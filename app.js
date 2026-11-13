@@ -779,6 +779,116 @@ function guide(c) {
   </div>`;
 }
 
+/* ---------- where we are: stage picture and time strip ---------- */
+// Steps whose action waits for a sign ("wrap when the bark is dark", "take out at 95°C"): until then nothing has changed yet.
+const WAITS = /כש|סביב|(?:^|\s)ב-\d{2}°C/;
+const QUICK_MIN = { prep: 10, heat: 20, in: 5, dial: 15, wrap: 10, sear: 10, glaze: 10, spritz: 5, out: 5, rest: 30, step: 10 };
+// Estimated clock times per step: finished steps use the time they were marked, the rest are projected forward.
+// A step's time runs until its action is done, so open-ended steps ("until 93°C") share whatever is left of the recipe's cooking time.
+function stageTimes(c) {
+  const info = planSteps(c.steps), r = S.recipes.find((x) => x.id === c.recipeId);
+  const total = (c.hours ?? r?.hours ?? 0) * 60000 * 60, rest = c.rest ?? r?.rest ?? null;
+  const cooking = (p) => p.kind !== 'prep' && p.kind !== 'heat' && p.kind !== 'rest';
+  const open = info.map((p, i) => cooking(p) && p.min == null && (p.meat != null || (p.kind === 'out' && WAITS.test(c.steps[i].t))));
+  if (!open.some(Boolean)) { const k = info.findLastIndex(cooking); if (k >= 0 && info[k].min == null) open[k] = true; }
+  const fixed = (p) => (p.min ?? (p.kind === 'rest' && rest ? rest : QUICK_MIN[p.kind])) * 60000;
+  const now = Date.now(), cur = c.steps.findIndex((x) => !x.at);
+  let t = c.start, cookEnd = null;
+  return info.map((p, i) => {
+    const from = t, at = c.steps[i].at;
+    // A step that both lights the smoker and smokes ("set to 120°C and smoke an hour") starts the cooking clock after the preheat.
+    if (cookEnd == null && (cooking(p) || p.kind === 'heat')) cookEnd = from + (p.kind === 'heat' ? QUICK_MIN.heat * 60000 : 0) + (total || 3600000);
+    let len = fixed(p);
+    if (open[i] && !at) {
+      const later = info.slice(i + 1).map((q, k) => ({ q, k: k + i + 1 })).filter(({ q }) => cooking(q));
+      const fixedLeft = later.filter(({ k }) => !open[k]).reduce((a, { q }) => a + fixed(q), 0);
+      len = Math.max(15 * 60000, (cookEnd - Math.max(from, i === cur ? now : from) - fixedLeft) / (1 + later.filter(({ k }) => open[k]).length) + (i === cur ? Math.max(0, now - from) : 0));
+    }
+    const plan = from + len;
+    const to = at ? Math.max(from, at) : i === cur ? Math.max(plan, now) : plan;
+    t = to;
+    return { ...p, from, to, plan, done: !!at, late: !at && i === cur && plan < now };
+  });
+}
+function sceneState(c, info, i) {
+  const st = { inside: false, wrapped: false, dial: null, lit: false, wasLit: false, kind: i >= 0 ? info[i].kind : 'end' };
+  const upto = i >= 0 ? i : info.length - 1;
+  for (let k = 0; k <= upto; k++) {
+    const p = info[k], t = c.steps[k].t, pending = k === i && WAITS.test(t);
+    if (p.dial) st.dial = p.dial;
+    if (p.kind === 'heat') { st.lit = st.wasLit = true; if (/לעשן|להכניס|להניח/.test(t)) st.inside = true; }
+    if (/להוציא/.test(t) && !pending) st.inside = false;
+    if (p.kind === 'in' || /להחזיר/.test(t)) st.inside = true;
+    if (p.kind === 'wrap' && !pending) st.wrapped = true;
+    if (/לפתוח את (?:הנייר|העטיפה)|להסיר את (?:הנייר|העטיפה)/.test(t)) st.wrapped = false;
+    if (p.kind === 'rest') { st.inside = false; st.lit = false; }
+  }
+  if (i < 0) { st.inside = false; st.lit = false; }
+  if (st.lit && !st.dial) st.dial = c.smokerTemp || null;
+  const at = st.dial ? ` ב-${st.dial}°C` : '';
+  st.hot = st.lit && (st.kind === 'sear' || st.dial >= 230);
+  st.label = i < 0 ? 'כל השלבים בוצעו' : st.kind === 'rest' ? 'מנוחה' : !st.lit ? (st.wasLit ? 'אחרי הבישול: פריסה והגשה' : 'הכנות, המעשנה עוד כבויה')
+    : st.inside ? (st.hot ? `צריבה${at}` : st.wrapped ? `עטוף או מכוסה, ממשיך${at}` : `עישון${at}`)
+    : st.kind === 'heat' ? `חימום המעשנה${st.dial ? ` ל-${st.dial}°C` : ''}` : `המעשנה דולקת${at}, האוכל בחוץ`;
+  return st;
+}
+function sceneSvg(st) {
+  const meat = (x, y) => `<ellipse class="${st.wrapped ? 'sc-foil' : 'sc-meat'}" cx="${x}" cy="${y}" rx="22" ry="9"/>`;
+  const smoke = st.lit ? [[128, 16, 7], [138, 6, 9], [124, 0, 6]].map(([x, y, r], k) => `<circle class="sc-smoke s${k}" cx="${x}" cy="${y}" r="${r}"/>`).join('') : '';
+  const flame = st.lit ? `<path class="sc-flame" d="${st.hot ? 'M170 134c-14-10-4-20-8-30 12 6 10 14 14 18 2-8 0-14 4-20 10 12 12 24-2 32z' : 'M170 134c-8-6-2-12-4-18 7 4 6 8 8 11 1-5 0-8 3-12 6 8 6 14-3 19z'}"/>` : '';
+  const steam = st.kind === 'rest' ? '<path class="sc-steam" d="M262 92c-4-6 4-8 0-14M276 92c-4-6 4-8 0-14M290 92c-4-6 4-8 0-14"/>' : '';
+  return `<svg class="scene" viewBox="0 0 340 150" role="img" aria-label="${esc(st.label)}">
+    ${smoke}
+    <rect class="sc-pipe" x="120" y="18" width="14" height="14" rx="2"/>
+    <rect class="sc-body" x="110" y="30" width="120" height="108" rx="8"/>
+    <rect class="sc-win ${st.hot ? 'hot' : st.lit ? 'on' : ''}" x="122" y="42" width="96" height="62" rx="5"/>
+    <line class="sc-rack" x1="124" x2="216" y1="60" y2="60"/><line class="sc-rack" x1="124" x2="216" y1="80" y2="80"/><line class="sc-rack" x1="124" x2="216" y1="98" y2="98"/>
+    ${st.inside ? meat(170, 72) : ''}
+    <rect class="sc-pan" x="140" y="108" width="60" height="6" rx="2"/>
+    ${flame}
+    <line class="sc-leg" x1="120" x2="116" y1="138" y2="148"/><line class="sc-leg" x1="220" x2="224" y1="138" y2="148"/>
+    ${st.dial && st.lit ? `<text class="sc-dial" x="70" y="62" text-anchor="middle">${st.dial}°C</text><text class="sc-sub" x="70" y="78" text-anchor="middle">כיוון החוגה</text>` : ''}
+    <rect class="sc-board" x="246" y="100" width="62" height="6" rx="3"/>
+    ${!st.inside ? meat(277, 92) : ''}
+    ${steam}
+  </svg>`;
+}
+function stageStrip(st) {
+  const W = 340, L = 6, R = 6, MINW = 18, span = st.reduce((a, x) => a + (x.to - x.from), 0) || 1;
+  const free = Math.max(0, W - L - R - MINW * st.length), now = Date.now();
+  let x = W - R, mark = '';
+  const segs = st.map((p, i) => {
+    const w = MINW + free * ((p.to - p.from) / span), x0 = x - w; x = x0;
+    const cur = !p.done && (i === 0 || st[i - 1].done) && st.slice(0, i).every((q) => q.done);
+    if (cur) { const f = Math.min(1, Math.max(0, (now - p.from) / Math.max(1, p.to - p.from))); const mx = x0 + w - f * w; mark = `<path class="st-now" d="M${(mx - 5).toFixed(1)} 2h10l-5 8z"/><line class="st-now" x1="${mx.toFixed(1)}" x2="${mx.toFixed(1)}" y1="8" y2="36"/>`; }
+    return `<rect class="st-seg ${p.done ? 'done' : cur ? 'cur' : ''}" x="${(x0 + 1).toFixed(1)}" y="12" width="${(w - 2).toFixed(1)}" height="22" rx="4"/><text class="${p.done ? 'done' : cur ? 'cur' : ''}" x="${(x0 + w / 2).toFixed(1)}" y="27" text-anchor="middle">${i + 1}</text>`;
+  }).join('');
+  const end = st[st.length - 1].to;
+  return `<svg class="strip" viewBox="0 0 ${W} 50" role="img" aria-label="ציר השלבים לפי זמן">
+    ${segs}${mark}
+    <text x="${W - R}" y="47" text-anchor="end">${fmtTime(st[0].from)}</text>
+    <text x="${L}" y="47" text-anchor="start">${fmtTime(end)}${dayLabel(end) !== dayLabel(st[0].from) ? ' ' + dayLabel(end) : ''}</text>
+  </svg>`;
+}
+function stageCard(c) {
+  if (!c.steps.length) return '';
+  const st = stageTimes(c), i = c.steps.findIndex((x) => !x.at), sc = sceneState(c, st, i);
+  const end = st[st.length - 1].to, p = st[i];
+  let line = '';
+  if (p) {
+    line = p.late
+      ? `<p class="note warn">לפי השעון, שלב ${i + 1} היה אמור להסתיים בסביבות ${fmtTime(p.plan)}. אם הוא בוצע, מסמנים "בוצע"; אם לא, ממשיכים לפי הטמפרטורה והמרקם.</p>`
+      : `<p class="muted">שלב ${i + 1} התחיל ב-${fmtTime(p.from)}, ולפי ההערכה יסתיים בסביבות ${fmtTime(p.to)}.</p>`;
+  }
+  return `<div class="card" id="stage">
+    <div class="row between"><h3>איפה אנחנו</h3><span class="chip">${esc(sc.label)}</span></div>
+    ${sceneSvg(sc)}
+    ${stageStrip(st)}
+    ${line}
+    ${p ? `<p class="muted">סיום משוער של כל השלבים, כולל מנוחה: <strong>${fmtTime(end)}</strong>${dayLabel(end) !== 'היום' ? ' ' + dayLabel(end) : ''}. זו הערכה לפי זמני המתכון; בפועל קובעת הטמפרטורה.</p>` : ''}
+  </div>`;
+}
+
 /* ---------- cook mode ---------- */
 function startCook(id) {
   if (S.cook && !confirm('יש בישול פעיל. להחליף אותו בבישול חדש? המדידות של הבישול הנוכחי יימחקו.')) return;
@@ -786,6 +896,7 @@ function startCook(id) {
   S.cook = {
     id: uid(), recipeId: r?.id || null, name: r?.name || 'בישול חופשי',
     weight: r?.weight ?? null, wood: r?.wood || '', smokerTemp: r?.smokerTemp ?? null, targetTemp: r?.targetTemp ?? null,
+    hours: r?.hours ?? null, rest: r?.rest ?? null, wake: true,
     start: Date.now(), steps: (r?.steps || []).map((t) => ({ t, at: null })), log: [], timers: [],
   };
   // Water-pan reminders for longer cooks; the clock starts when the meat goes in.
@@ -793,6 +904,7 @@ function startCook(id) {
     const hasIn = planSteps(S.cook.steps).some((p) => p.kind === 'in');
     S.cook.water = { every: 120, next: hasIn ? null : Date.now() + 120 * 60000, fired: false };
   }
+  setWake(true, true);
   save(); closeSheet(); tab = 'cook'; render();
 }
 function analyze(c) {
@@ -871,7 +983,7 @@ function viewCook() {
         <button class="btn block" data-act="cook-start" data-arg="">בישול חופשי</button>
       </div>`;
   }
-  const a = analyze(c);
+  const a = analyze(c), plan = stageTimes(c);
   const done = c.steps.filter((s) => s.at).length;
   const timers = [...c.timers].sort((x, y) => x.end - y.end);
   const notifState = !('Notification' in window) ? 'none' : Notification.permission;
@@ -881,8 +993,13 @@ function viewCook() {
       <div class="big" data-elapsed="${c.start}">${fmtClock(Date.now() - c.start)}</div>
       <div class="chips">${c.weight ? `<span class="chip">${c.weight} ק"ג</span>` : ''}${c.smokerTemp ? `<span class="chip">מעשנה ${c.smokerTemp}°C</span>` : ''}${c.targetTemp ? `<span class="chip">יעד ${c.targetTemp}°C</span>` : ''}${c.wood ? `<span class="chip">${esc(c.wood)}</span>` : ''}</div>
       <p class="note ${a.cls}">${esc(a.msg)}</p>
-      <label class="row"><input type="checkbox" data-act="wake-toggle" ${wakeWanted ? 'checked' : ''}> <span>להשאיר את המסך דולק</span></label>
+      ${'wakeLock' in navigator
+        ? `<label class="row"><input type="checkbox" data-act="wake-toggle" ${wakeWanted ? 'checked' : ''}> <span>המסך נשאר דולק כל זמן שהבישול פעיל</span></label>`
+        : '<p class="muted small">הדפדפן הזה לא מאפשר להשאיר את המסך דולק. אפשר לבטל זמנית את הנעילה האוטומטית בהגדרות הטלפון.</p>'}
+      <p class="muted small">הבישול נשמר במכשיר ונשאר פתוח גם אם סוגרים את האפליקציה. הוא מסתיים רק בלחיצה על "סיום ותיעוד ביומן" או על "ביטול".</p>
     </div>
+
+    ${stageCard(c)}
 
     ${guide(c)}
 
@@ -890,7 +1007,8 @@ function viewCook() {
       <div class="row between"><h3>שלבים</h3><span class="muted">${done} מתוך ${c.steps.length}</span></div>
       <ul class="steps">${c.steps.map((s, i) => `<li><label class="${s.at ? 'done' : ''}">
         <input type="checkbox" data-act="step-toggle" data-arg="${i}" ${s.at ? 'checked' : ''}>
-        <span>${esc(s.t)}</span>${s.at ? `<time>${fmtTime(s.at)}</time>` : ''}</label></li>`).join('')}</ul>
+        <span>${esc(s.t)}</span><time>${s.at ? fmtTime(s.at) : 'בערך ' + fmtTime(plan[i].to)}</time></label></li>`).join('')}</ul>
+      <p class="muted small">השעות שליד שלבים שעוד לא בוצעו הן הערכה, והן מתעדכנות בכל שלב שמסמנים.</p>
     </div>` : ''}
 
     <div class="card">
@@ -991,16 +1109,19 @@ async function fireAlarm(label, title = 'הטיימר הסתיים') {
     } catch { /* notifications unavailable */ }
   }
 }
-async function setWake(on) {
-  wakeWanted = on;
+// While a cook is active the screen stays on. "quiet" requests (on open, on start) never nag;
+// if the browser refuses without a tap, the next tap or return to the app tries again.
+async function setWake(on, quiet = false) {
+  wakeWanted = on && 'wakeLock' in navigator;
   try {
-    if (on && 'wakeLock' in navigator) { wake = await navigator.wakeLock.request('screen'); }
-    else if (on) { wakeWanted = false; toast('הדפדפן הזה לא תומך בהשארת המסך דולק'); render(); }
+    if (wakeWanted) { if (!wake || wake.released) wake = await navigator.wakeLock.request('screen'); }
+    else if (on) { if (!quiet) toast('הדפדפן הזה לא תומך בהשארת המסך דולק'); }
     else if (wake) { await wake.release(); wake = null; }
-  } catch { wakeWanted = false; toast('לא הצלחתי להשאיר את המסך דולק'); render(); }
+  } catch { if (!quiet) { wakeWanted = false; toast('לא הצלחתי להשאיר את המסך דולק'); render(); } }
 }
+let stageDrawn = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { if (wakeWanted) setWake(true); tick(); }
+  if (document.visibilityState === 'visible') { if (wakeWanted) setWake(true, true); stageDrawn = 0; tick(); }
 });
 
 function tick() {
@@ -1013,6 +1134,10 @@ function tick() {
     el.parentElement.classList.toggle('over', +el.dataset.end <= now);
   });
   if (!S.cook) return;
+  if (tab === 'cook' && now - stageDrawn > 30000) {
+    stageDrawn = now;
+    const el = $('#stage'); if (el) el.outerHTML = stageCard(S.cook);
+  }
   const due = S.cook.timers.filter((t) => !t.fired && t.end <= now);
   if (due.length) {
     due.forEach((t) => { t.fired = true; });
@@ -1443,7 +1568,7 @@ const ACT = {
   'timer-hours': (_, el) => { const h = +el.value; if (h > 0) addTimer(h * 60, `טיימר ${hoursLabel(h)}`); },
   'timer-del': (id) => { S.cook.timers = S.cook.timers.filter((t) => t.id !== id); save(); render(); },
   'log-del': (at) => { S.cook.log = S.cook.log.filter((r) => r.at !== +at); save(); render(); },
-  'wake-toggle': (_, el) => setWake(el.checked),
+  'wake-toggle': (_, el) => { if (S.cook) { S.cook.wake = el.checked; save(); } setWake(el.checked); },
   'notif-enable': async () => { try { await Notification.requestPermission(); } catch { /* ignore */ } render(); },
   'journal-new': () => journalForm(),
   'journal-open': openJournal,
@@ -1476,6 +1601,7 @@ document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el || ON_CHANGE.has(el.dataset.act) || el.matches('select, input[type="file"]')) return;
   ensureAudio();
+  if (wakeWanted && (!wake || wake.released)) setWake(true, true);
   ACT[el.dataset.act]?.(el.dataset.arg, el);
 });
 document.addEventListener('change', (e) => {
@@ -1519,7 +1645,7 @@ $('#sheet').addEventListener('close', () => { $('#sheet').innerHTML = ''; });
     console.error(err);
     toast('אין גישה לאחסון במכשיר. הנתונים לא יישמרו (ייתכן שזה מצב גלישה פרטית).');
   }
-  if (S.cook) tab = 'cook';
+  if (S.cook) { tab = 'cook'; if (S.cook.wake !== false) setWake(true, true); }
   // v2: pack recipes first shipped with Fahrenheit dial settings; the dial is in Celsius.
   if (S.v < 2) {
     const round = { 107: 110, 121: 120, 135: 135, 149: 150 };

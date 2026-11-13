@@ -207,3 +207,32 @@ details.card[open] > summary::after { content: "－"; }
 .picklist label:last-child { border-bottom: 0; }
 ul.plain { margin: 4px 0 12px; padding-inline-start: 20px; display: grid; gap: 6px; }
 details h3 { margin: 14px 0 4px; }
+
+.scene, .strip { width: 100%; height: auto; direction: ltr; display: block; }
+.scene { max-width: 420px; margin: 4px auto 0; }
+.sc-body { fill: var(--surface-2); stroke: var(--line); stroke-width: 2; }
+.sc-pipe, .sc-pan { fill: var(--line); }
+.sc-win { fill: var(--bg); stroke: var(--line); stroke-width: 1.5; }
+.sc-win.on { fill: #3a2414; }
+.sc-win.hot { fill: #6a2410; }
+.sc-rack, .sc-leg { stroke: var(--muted); stroke-width: 1.5; stroke-linecap: round; }
+.sc-leg { stroke-width: 4; }
+.sc-meat { fill: #a4572c; stroke: #6e3413; stroke-width: 1.5; }
+.sc-foil { fill: #cfd6da; stroke: #8b959b; stroke-width: 1.5; }
+.sc-flame { fill: var(--accent); }
+.sc-board { fill: var(--muted); }
+.sc-steam { fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; }
+.sc-smoke { fill: var(--muted); opacity: .45; animation: puff 3s ease-in-out infinite; }
+.sc-smoke.s1 { animation-delay: 1s; }
+.sc-smoke.s2 { animation-delay: 2s; }
+.sc-dial { fill: var(--text); font-size: 20px; font-weight: 700; }
+.sc-sub { fill: var(--muted); font-size: 10px; }
+@keyframes puff { 0%, 100% { opacity: .2; transform: translateY(3px); } 50% { opacity: .55; transform: translateY(-3px); } }
+@media (prefers-reduced-motion: reduce) { .sc-smoke { animation: none; } }
+.strip text { fill: var(--muted); font-size: 10px; }
+.strip text.cur { fill: var(--accent-ink); font-weight: 700; }
+.strip text.done { fill: var(--text); }
+.st-seg { fill: var(--surface-2); stroke: var(--line); }
+.st-seg.done { fill: var(--line); }
+.st-seg.cur { fill: var(--accent); stroke: var(--accent); }
+.st-now { fill: var(--text); stroke: var(--text); stroke-width: 1.5; }
