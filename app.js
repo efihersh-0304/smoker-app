@@ -721,6 +721,10 @@ function viewCook() {
     <div class="card">
       <h3>טיימרים</h3>
       <div class="row">${[15, 30, 45, 60].map((m) => `<button class="btn sm" data-act="timer-add" data-arg="${m}">${m} דק'</button>`).join('')}</div>
+      <select data-act="timer-hours" aria-label="טיימר בשעות">
+        <option value="">טיימר בשעות…</option>
+        ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((h) => `<option value="${h}">${hoursLabel(h)}</option>`).join('')}
+      </select>
       <form data-form="timer" class="row">
         <div class="grow">${inp('label', '', 'placeholder="למשל: ריסוס" aria-label="שם הטיימר"')}</div>
         <div>${numInp('min', '', 'placeholder="דקות" aria-label="דקות" size="5" required')}</div>
@@ -752,6 +756,7 @@ function viewCook() {
     <button class="btn primary block" data-act="cook-finish">סיום ותיעוד ביומן</button>
     <button class="btn danger block" data-act="cook-cancel">ביטול הבישול בלי תיעוד</button>`;
 }
+const hoursLabel = (h) => (h === 1 ? 'שעה' : h === 2 ? 'שעתיים' : `${h} שעות`);
 function addTimer(min, label) {
   if (!S.cook || !(min > 0)) return;
   ensureAudio();
@@ -1145,6 +1150,7 @@ const ACT = {
   },
   'step-toggle': (i) => { const s = S.cook.steps[+i]; s.at = s.at ? null : Date.now(); save(); render(); },
   'timer-add': (m) => addTimer(+m),
+  'timer-hours': (_, el) => { const h = +el.value; if (h > 0) addTimer(h * 60, `טיימר ${hoursLabel(h)}`); },
   'timer-del': (id) => { S.cook.timers = S.cook.timers.filter((t) => t.id !== id); save(); render(); },
   'log-del': (at) => { S.cook.log = S.cook.log.filter((r) => r.at !== +at); save(); render(); },
   'wake-toggle': (_, el) => setWake(el.checked),
@@ -1174,7 +1180,7 @@ const ACT = {
     save(); render(); toast(add.length === 1 ? 'נוסף מתכון אחד' : `נוספו ${add.length} מתכונים`);
   },
 };
-const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle']);
+const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle', 'timer-hours']);
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
