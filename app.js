@@ -117,7 +117,7 @@ const PACK_RECIPES = [
   },
   {
     pack: 'pb-pastrami', name: 'פסטרמה מחזה בקר', cut: 'בריסקט בקר (החלק הרזה)', weight: 2.5, smokerTemp: 120, targetTemp: 93, hours: 7, rest: 60, wood: 'אלון',
-    ingredients: 'לכבישה (5-6 ימים): 4 ליטר מים, 350 גרם מלח גס, 100 גרם סוכר, 25 גרם מלח משמר ורוד מס\' 1, 5 שיני שום, 2 כפות תבלין כבישה\nלציפוי: 3 כפות פלפל שחור גרוס גס, 3 כפות זרעי כוסברה גרוסים, כף פפריקה, כפית שום גבישי',
+    ingredients: 'לכבישה (5-6 ימים): 4 ליטר מים, 350 גרם מלח גס, 100 גרם סוכר, 20 גרם מלח משמר ורוד מס\' 1, 5 שיני שום, 2 כפות תבלין כבישה\nלציפוי: 3 כפות פלפל שחור גרוס גס, 3 כפות זרעי כוסברה גרוסים, כף פפריקה, כפית שום גבישי',
     steps: ['להמיס את חומרי הכבישה במים, לקרר לגמרי ולהשרות את הנתח במקרר 5-6 ימים, עם היפוך פעם ביום', 'לשטוף, להשרות במים נקיים שעתיים ולייבש היטב', 'לצפות בתערובת הפלפל והכוסברה וללחוץ שתידבק', 'לכוון את הפיט בוס ל-120°C', 'לעשן עד 70°C בערך, כ-4 שעות', 'לעטוף היטב בנייר כסף עם רבע כוס מים ולהמשיך עד 93°C', 'מנוחה עטופה של שעה, ולפרוס דק נגד כיוון הסיבים'],
     notes: 'את המלח המשמר שוקלים במדויק ולא מעגלים כלפי מעלה. בלי מלח משמר מתקבל חזה מעושן בצבע אפור, טעים אבל לא פסטרמה. ' + PB,
   },
@@ -232,7 +232,7 @@ const PACK_RECIPES = [
 ];
 
 const blank = () => ({
-  v: 2,
+  v: 3,
   recipes: SEED_RECIPES.map((r) => ({ ...r, id: uid(), updated: Date.now() })),
   cook: null, journal: [], ideas: [], seasoning: {}, lastBackup: null, packs: [],
 });
@@ -611,6 +611,120 @@ function runImport(f) {
   recipeForm(res.recipe, '', res.hint);
 }
 
+/* ---------- cook guidance: what now, what next, what to prepare ---------- */
+const STEP_KIND = [
+  ['heat', /לכוון את|לייצב את המעשנה|לחמם את המעשנה|preheat/i],
+  ['dial', /להעלות ל-|להוריד ל-/],
+  ['wrap', /לעטוף|לכסות היטב|\bwrap/i],
+  ['sear', /לצרוב|צריבה|מחבת ברזל|\bsear/i],
+  ['glaze', /זיגוג|\bglaze/i],
+  ['spritz', /לרסס|תמלחת פעם|spritz/i],
+  ['rest', /^מנוחה|^rest\b/i],
+  ['out', /להוציא|מוכן כש|remove from/i],
+  ['in', /להכניס|להניח|לסדר על|לעשן|place (?:the|it) /i],
+];
+const KIND_LABEL = { prep: 'הכנה', heat: 'חימום', in: 'למעשנה', dial: 'שינוי טמפרטורה', wrap: 'עטיפה', sear: 'צריבה', glaze: 'זיגוג', spritz: 'הרטבה', out: 'הוצאה', rest: 'מנוחה', step: 'שלב' };
+const PREPARE = {
+  heat: 'פלטים במכל, מגש מים מלא ומגש שומן נקי',
+  in: 'מדחום לנעיצה בחלק העבה של הנתח',
+  wrap: 'נייר קצבים או נייר כסף, והנוזלים לעטיפה אם המתכון דורש',
+  sear: 'מחבת ברזל או גריל; לחמם כמה דקות מראש',
+  glaze: 'את הזיגוג, ומברשת',
+  spritz: 'בקבוק ריסוס, או קערית ומברשת',
+  out: 'מגש, כפפות חום ומדחום לבדיקה אחרונה',
+  rest: 'צידנית ומגבות למנוחה ארוכה, או קרש חיתוך ונייר כסף',
+};
+function stepMinutes(t) {
+  if (/שעה וחצי/.test(t)) return 90;
+  const m = t.match(/(\d+(?:[.,]\d+)?)(?:\s*[-–]\s*(\d+(?:[.,]\d+)?))?\s*(שעות|דקות)/);
+  if (m) { const a = num(m[1]), b = m[2] ? num(m[2]) : a; return Math.round(((a + b) / 2) * (m[3] === 'שעות' ? 60 : 1)); }
+  if (/שעתיים/.test(t)) return 120;
+  if (/חצי שעה/.test(t)) return 30;
+  if (/רבע שעה/.test(t)) return 15;
+  if (/(?:^|\s)כ?שעה(?!\s*לפני)/.test(t)) return 60;
+  return null;
+}
+// Reads each step's text: what kind of action it is, the dial setting or meat temperature it names, and its duration.
+function planSteps(steps) {
+  const heatAt = steps.findIndex((x) => STEP_KIND[0][1].test(x.t));
+  let seenIn = false;
+  return steps.map((x, i) => {
+    let kind = i < heatAt ? 'prep' : (STEP_KIND.find(([, re]) => re.test(x.t)) || ['step'])[0];
+    if (kind === 'in') { if (seenIn) kind = 'step'; seenIn = true; }
+    const temps = [...x.t.matchAll(/(\d{2,3})\s*°C/g)].map((m) => +m[1]);
+    const dial = kind === 'heat' ? temps[0] ?? null : kind === 'dial' ? temps.find((v) => v >= 100) ?? null : null;
+    const meats = temps.filter((v) => v !== dial && v >= 40 && v <= 99);
+    const meat = (kind === 'out' ? meats[0] : meats[meats.length - 1]) ?? null;
+    return { kind, dial, meat, min: kind === 'prep' ? null : stepMinutes(x.t) };
+  });
+}
+function meatTrend(c) {
+  const m = c.log.filter((r) => r.meat != null).sort((a, b) => a.at - b.at);
+  const last = m[m.length - 1] || null;
+  if (m.length < 2) return { last, slope: null };
+  const win = m.filter((r) => r.at >= last.at - 90 * 60000);
+  const first = win.length >= 2 ? win[0] : m[m.length - 2];
+  const hrs = (last.at - first.at) / 3600000;
+  return { last, slope: hrs >= 0.15 ? (last.meat - first.meat) / hrs : null };
+}
+function markStep(i) {
+  const c = S.cook, x = c.steps[i]; if (!x) return;
+  x.at = x.at ? null : Date.now();
+  if (x.at && c.water && !c.water.next && planSteps(c.steps)[i].kind === 'in') c.water.next = Date.now() + c.water.every * 60000;
+  save(); render();
+}
+function guide(c) {
+  if (!c.steps.length) return '';
+  const info = planSteps(c.steps);
+  const i = c.steps.findIndex((x) => !x.at);
+  const { last, slope } = meatTrend(c);
+  const lastSmoker = [...c.log].reverse().find((r) => r.smoker != null);
+  const dials = info.map((p, n) => ({ ...p, n })).filter((p) => p.dial);
+  const wraps = info.map((p, n) => ({ ...p, n })).filter((p) => p.kind === 'wrap');
+  const lines = [];
+  if (dials.length === 1) lines.push(`טמפרטורה: ${dials[0].dial}°C לאורך כל הבישול, בלי שינוי.`);
+  else if (dials.length > 1) lines.push(`שינויי טמפרטורה: ${dials.map((d, k) => (k ? `${d.dial}°C בשלב ${d.n + 1}` : `מתחילים ב-${d.dial}°C`)).join(', ואז ')}.`);
+  lines.push(wraps.length ? `עטיפה: ${wraps.map((w) => `בשלב ${w.n + 1}${w.meat ? `, סביב ${w.meat}°C בבשר` : ''}`).join('; ')}.` : 'עטיפה: אין במתכון הזה.');
+  let water = '';
+  if (c.water) {
+    water = c.water.next
+      ? `<div class="row between"><span>מגש המים: בדיקה הבאה ב-<strong>${fmtTime(c.water.next)}</strong></span><button class="btn sm" data-act="water-done">בדקתי ומילאתי</button></div>`
+      : '<p class="muted">מגש המים: למלא לפני ההדלקה. התזכורות לבדיקה יתחילו כשהנתח ייכנס למעשנה.</p>';
+  }
+  let now = '<p class="note good">כל השלבים בוצעו. אפשר לסיים את הבישול ולרשום אותו ביומן.</p>';
+  if (i >= 0) {
+    const p = info[i], cues = [];
+    if (p.kind === 'heat' && p.dial) {
+      const ready = lastSmoker && Math.abs(lastSmoker.smoker - p.dial) <= 8;
+      cues.push(ready ? `המעשנה התייצבה סביב ${lastSmoker.smoker}°C. אפשר להכניס.` : `מדליקים במצב SMOKE בדלת פתוחה (כ-5 דקות), סוגרים, ומחממים 15 עד 20 דקות. מכניסים רק אחרי שהמעשנה התייצבה על ${p.dial}°C; רושמים מדידת מעשנה כדי לוודא.`);
+    }
+    if (p.meat) {
+      if (!last) cues.push(`נקודת הציון של השלב: ${p.meat}°C בבשר. כדאי לרשום מדידה.`);
+      else if (last.meat >= p.meat) cues.push(`הבשר ב-${last.meat}°C, ונקודת הציון של השלב (${p.meat}°C) הושגה.`);
+      else {
+        const eta = slope > 0.5 ? last.at + ((p.meat - last.meat) / slope) * 3600000 : null;
+        cues.push(`נקודת הציון של השלב: ${p.meat}°C בבשר. מדידה אחרונה: ${last.meat}°C, חסרות ${p.meat - last.meat} מעלות${eta ? `; בקצב הנוכחי בסביבות ${fmtTime(eta)}` : ''}.`);
+      }
+    }
+    const nx = info[i + 1];
+    now = `
+      <p class="now-step"><span class="chip">${KIND_LABEL[p.kind]}</span> ${esc(c.steps[i].t)}</p>
+      ${cues.map((t) => `<p class="note">${t}</p>`).join('')}
+      <div class="row">
+        <button class="btn primary grow" data-act="step-done" data-arg="${i}">בוצע, לשלב הבא</button>
+        ${p.min ? `<button class="btn" data-act="step-timer" data-arg="${i}">טיימר ${fmtDur(p.min)}</button>` : ''}
+      </div>
+      ${nx ? `<div class="next-step"><div class="muted small">הבא בתור · ${KIND_LABEL[nx.kind]}</div><div>${esc(c.steps[i + 1].t)}</div>
+        ${PREPARE[nx.kind] ? `<div class="muted small">להכין מראש: ${PREPARE[nx.kind]}.</div>` : ''}
+        ${nx.kind === 'dial' && nx.dial ? `<div class="muted small">בשלב הזה מכוונים את המעשנה ל-${nx.dial}°C.</div>` : ''}</div>` : ''}`;
+  }
+  return `<div class="card now">
+    <div class="row between"><h3>מה עכשיו</h3><span class="muted">${i >= 0 ? `שלב ${i + 1} מתוך ${c.steps.length}` : ''}</span></div>
+    ${now}
+    <div class="milestones">${lines.map((t) => `<p class="muted">${t}</p>`).join('')}${water}</div>
+  </div>`;
+}
+
 /* ---------- cook mode ---------- */
 function startCook(id) {
   if (S.cook && !confirm('יש בישול פעיל. להחליף אותו בבישול חדש? המדידות של הבישול הנוכחי יימחקו.')) return;
@@ -620,6 +734,11 @@ function startCook(id) {
     weight: r?.weight ?? null, wood: r?.wood || '', smokerTemp: r?.smokerTemp ?? null, targetTemp: r?.targetTemp ?? null,
     start: Date.now(), steps: (r?.steps || []).map((t) => ({ t, at: null })), log: [], timers: [],
   };
+  // Water-pan reminders for longer cooks; the clock starts when the meat goes in.
+  if ((r?.hours ?? 0) >= 2) {
+    const hasIn = planSteps(S.cook.steps).some((p) => p.kind === 'in');
+    S.cook.water = { every: 120, next: hasIn ? null : Date.now() + 120 * 60000, fired: false };
+  }
   save(); closeSheet(); tab = 'cook'; render();
 }
 function analyze(c) {
@@ -711,6 +830,8 @@ function viewCook() {
       <label class="row"><input type="checkbox" data-act="wake-toggle" ${wakeWanted ? 'checked' : ''}> <span>להשאיר את המסך דולק</span></label>
     </div>
 
+    ${guide(c)}
+
     ${c.steps.length ? `<div class="card">
       <div class="row between"><h3>שלבים</h3><span class="muted">${done} מתוך ${c.steps.length}</span></div>
       <ul class="steps">${c.steps.map((s, i) => `<li><label class="${s.at ? 'done' : ''}">
@@ -767,8 +888,13 @@ function addLog(f) {
   const d = Object.fromEntries(new FormData(f));
   const smoker = num(d.smoker), meat = num(d.meat), note = d.note.trim();
   if (smoker == null && meat == null && !note) { toast('אין מה לרשום: צריך טמפרטורה אחת לפחות או הערה'); return; }
-  S.cook.log.push({ at: Date.now(), smoker, meat, note });
+  const c = S.cook;
+  c.log.push({ at: Date.now(), smoker, meat, note });
+  const i = c.steps.findIndex((x) => !x.at), cue = i >= 0 ? planSteps(c.steps)[i].meat : null;
+  const hit = meat != null && cue && meat >= cue && c.cued !== i;
+  if (hit) c.cued = i;
   save(); render();
+  if (hit) fireAlarm(`הבשר ב-${meat}°C. ${c.steps[i].t}`, 'נקודת ציון בבישול');
 }
 function finishCook() {
   const c = S.cook; if (!c) return;
@@ -798,7 +924,7 @@ function beep() {
     o.start(now + i * 0.35); o.stop(now + i * 0.35 + 0.32);
   }
 }
-async function fireAlarm(label) {
+async function fireAlarm(label, title = 'הטיימר הסתיים') {
   beep();
   if (navigator.vibrate) navigator.vibrate([400, 150, 400, 150, 400]);
   $('#alarm-text').textContent = label;
@@ -806,8 +932,8 @@ async function fireAlarm(label) {
   if ('Notification' in window && Notification.permission === 'granted') {
     try {
       const reg = await navigator.serviceWorker?.getRegistration();
-      if (reg) reg.showNotification('הטיימר הסתיים', { body: label, tag: 'smoker-timer', icon: 'icon-192.png' });
-      else new Notification('הטיימר הסתיים', { body: label });
+      if (reg) reg.showNotification(title, { body: label, tag: 'smoker-timer', icon: 'icon-192.png' });
+      else new Notification(title, { body: label });
     } catch { /* notifications unavailable */ }
   }
 }
@@ -838,6 +964,11 @@ function tick() {
     due.forEach((t) => { t.fired = true; });
     save();
     fireAlarm(due.map((t) => t.label).join(' · '));
+  }
+  const w = S.cook.water;
+  if (w?.next && !w.fired && w.next <= now) {
+    w.fired = true; save();
+    fireAlarm('בדיקת מגש המים: להוסיף מים חמים אם המפלס ירד.', 'תזכורת');
   }
 }
 
@@ -954,6 +1085,67 @@ function viewIdeas() {
 }
 
 /* ---------- tools ---------- */
+const PRACTICES = [
+  ['הדלקה וחימום', [
+    'מדליקים במצב SMOKE כשדלת התא פתוחה, עד שמחזור ההצתה מסתיים (כ-5 דקות).',
+    'סוגרים את הדלת ומחממים 15 עד 20 דקות לפני שמכניסים אוכל. ביום קר מוסיפים 20 דקות לפחות.',
+    'כשמורידים מטמפרטורה גבוהה לנמוכה, פותחים את הדלת עד שהחום יורד קרוב ליעד. כך האש לא נכבית.',
+    'אחרי שמכל הפלטים התרוקן לגמרי, לוחצים על PRIME עד שפלטים נופלים שוב לתא הבעירה.',
+  ]],
+  ['מגש המים', [
+    'ממלאים עד כשלושה רבעים, ולא נותנים לו להתייבש בזמן בישול. המגש גם אוסף שומן.',
+    'קצב ההתאדות משתנה מאוד ממעשנה למעשנה ומיום ליום (בין שעה וחצי לשש שעות), ולכן האפליקציה מזכירה לבדוק כל שעתיים.',
+    'ממלאים במים חמים כדי שהטמפרטורה בתא לא תצנח. בבישול ארוך אפשר להעלות את המגש קומה כדי שהמים יחזיקו יותר.',
+    'ריפוד בנייר כסף מקל על הניקוי.',
+  ]],
+  ['הדלת', [
+    'כל פתיחה של הדלת מאריכה את הבישול ב-10 עד 15 דקות. מרכזים פעולות: מדידה, ריסוס ובדיקת מים באותה פתיחה.',
+    'משאירים רווח בין הנתחים לדפנות. תא עמוס מדי מאריך את הבישול.',
+    'אין נתון רשמי על הפרשי חום בין המדפים, ובעלי מעשנות מדווחים על כיוונים הפוכים. מדחום בגובה המדף ייתן תשובה למעשנה שלך.',
+  ]],
+  ['עטיפה ועצירת הטמפרטורה (stall)', [
+    'העצירה מתחילה סביב 66 עד 68°C ויכולה להימשך שעות. הסיבה היא קירור מהתאדות, לא תקלה.',
+    'שלוש אפשרויות: לחכות, לעטוף, או לבשל חם יותר (סביב 150°C כמעט אין עצירה).',
+    'עוטפים כשהקרום כהה ויציב, בדרך כלל בין 66 ל-74°C.',
+    'נייר קצבים שומר על קרום יציב יותר. נייר כסף מהיר יותר ושומר יותר נוזלים, אבל מרכך את הקרום.',
+  ]],
+  ['ריסוס', [
+    'מתחילים אחרי שעתיים עד ארבע, כשהקרום התייצב, ואז כל חצי שעה עד שעה. מים, חומץ תפוחים או מיץ תפוחים.',
+    'המומחים חלוקים על המחיר: יש שמדדו השפעה זניחה, ויש שמדברים על 10 עד 20 אחוז יותר זמן.',
+  ]],
+  ['מנוחה והחזקה', [
+    'בריסקט ונתחים גדולים: מנוחה של שעתיים עד ארבע נותנת את התוצאה הטובה ביותר.',
+    'צידנית עם מגבות מחזיקה חום שלוש עד ארבע שעות.',
+    'מחזיקים אוכל חם ב-60°C ומעלה. בתנור: סביב 60°C, ולא מעל 71°C.',
+    'בנתחים ארוכים המספר הוא רק כיוון. מוכן כשהמדחום נכנס כמו לחמאה, בדרך כלל בין 93 ל-99°C.',
+  ]],
+  ['בטיחות מזון', [
+    'מינימום לפי ה-USDA: נתחים שלמים של בקר וטלה 63°C ועוד שלוש דקות מנוחה; בשר טחון 71°C; עוף והודו 74°C; דגים 63°C.',
+    'טמפרטורות נמוכות מ-63°C בנתחי בקר וטלה (מדיום-רייר) הן בחירה של טעם, מתחת להמלצה הרשמית.',
+    'אזור הסכנה הוא בין 4 ל-60°C. אוכל לא נשאר בו יותר משעתיים, ושעה אחת ביום חם מאוד.',
+    'מפשירים לגמרי לפני העישון, במקרר.',
+    'שאריות: למקרר בתוך שעתיים, בכלים רדודים. אוכלים בתוך שלושה עד ארבעה ימים ומחממים ל-74°C.',
+    'מלח משמר שוקלים במדויק. לא מוסיפים "ליתר ביטחון".',
+  ]],
+  ['מדחום', [
+    'נועצים בחלק העבה ביותר, רחוק מעצם, משומן ומגיד. בנתח דק נועצים מהצד.',
+    'התצוגה של הבקר לא תמיד תואמת את החום ליד האוכל. מדחום בגובה המדף מדויק יותר.',
+    'בדיקת כיול: כוס מלאה קרח עם מים, לערבב, ולמדוד בלי לגעת בדפנות. צריך להראות 0°C.',
+  ]],
+  ['ניקוי ותחזוקה', [
+    'אחרי כל בישול: תא הבעירה, הרשתות, מגש המים ומגש השומן.',
+    'כל שניים-שלושה בישולים: הזכוכית (סודה לשתייה וחומץ) וחיישן הטמפרטורה.',
+    'כל חמישה-שישה בישולים: תחתית התא, צינור ניקוז השומן ופתח האוויר.',
+    'כיבוי: מריצים על 177°C בדלת סגורה 5 עד 10 דקות (יותר אחרי בישול שומני), ואז נותנים למאוורר לסיים את מחזור הקירור.',
+    'שריפת שומן: משאירים את הדלת סגורה ומכבים. לא שופכים מים ולא מנתקים מהחשמל.',
+    'פלטים שומרים בכלי אטום ויבש. פלטים רטובים מתנפחים וחוסמים את הבורג.',
+  ]],
+  ['תקלות', [
+    'תצוגה מהבהבת: החום ירד מתחת ל-65°C והאש עלולה להיכבות. בודקים פלטים, בורג, אפר בתא הבעירה ומאוורר.',
+    'ErH: התחממות יתר. מכבים, נותנים להתקרר, מנקים ומדליקים מחדש.',
+    'Er1: חיבור חיישן התא. noP: חיבור מדחום הבשר.',
+  ]],
+];
 const TEMPS = [
   ['בריסקט', '110–125', '93–96', 'מוכן כשהמדחום נכנס בלי התנגדות'],
   ['שורט ריבס / אסאדו', '110–125', '93–96', ''],
@@ -1004,6 +1196,21 @@ function viewTools() {
     </details>
 
     <details class="card">
+      <summary>כמה מנות לשעת הגשה אחת</summary>
+      <form data-calc="multi">
+        <p class="muted">מסמנים את המנות וקובעים שעת הגשה. האפליקציה מחשבת מתי להכניס כל מנה כדי שהכול יהיה מוכן יחד.</p>
+        ${field('שעת הגשה', inp('serve', defaultServe(), 'type="datetime-local"'))}
+        <div class="picklist">${[...S.recipes].sort((a, b) => a.name.localeCompare(b.name, 'he')).map((r) => `<label><input type="checkbox" name="r" value="${r.id}"> <span class="grow">${esc(r.name)}</span> <span class="muted small">${r.hours ? fmtDur(r.hours * 60) : 'בלי זמן'}</span></label>`).join('')}</div>
+        <div class="grid2">
+          ${field('מרווח ביטחון (דקות)', numInp('buffer', '30'))}
+          ${field('חימום המעשנה (דקות)', numInp('preheat', '30'))}
+        </div>
+        <div class="result" data-out="multi"><span class="muted">מסמנים שתי מנות או יותר ושעת הגשה, ולוח הזמנים המשותף מופיע כאן.</span></div>
+        <button type="button" class="btn block" data-act="plan-ics">ייצוא ליומן הטלפון (עם התראות)</button>
+      </form>
+    </details>
+
+    <details class="card">
       <summary>מחשבון מלח</summary>
       <form data-calc="salt">
         <div class="grid2">
@@ -1033,6 +1240,12 @@ function viewTools() {
         <tbody>${TEMPS.map((t) => `<tr><td>${t[0]}${t[3] ? `<div class="muted small">${t[3]}</div>` : ''}</td><td class="n">${t[1]}</td><td class="n">${t[2]}</td></tr>`).join('')}</tbody>
       </table>
       <p class="muted small">ערכים מקובלים להכוונה. בעוף ובבשר טחון הטמפרטורה היא עניין של בטיחות, ולא רק של טעם.</p>
+    </details>
+
+    <details class="card">
+      <summary>כללי עבודה לפיט בוס אנכי</summary>
+      ${PRACTICES.map(([h, items]) => `<h3>${h}</h3><ul class="plain">${items.map((t) => `<li>${t}</li>`).join('')}</ul>`).join('')}
+      <p class="muted small">מקורות: חוברת ההפעלה של Pit Boss Pro Series 4 Vertical, ה-USDA, ThermoWorks, AmazingRibs ו-Texas A&amp;M. אם החוברת של הדגם שלך אומרת אחרת, היא הקובעת.</p>
     </details>
 
     <details class="card">
@@ -1067,6 +1280,26 @@ function computePlan(f) {
   };
 }
 const CALC = {
+  multi(f, out) {
+    const serve = new Date(f.serve.value).getTime(), buffer = num(f.buffer.value) || 0, preheat = num(f.preheat.value) || 0;
+    const picked = [...f.querySelectorAll('input[name="r"]:checked')].map((el) => S.recipes.find((r) => r.id === el.value)).filter(Boolean);
+    const ok = picked.filter((r) => r.hours > 0), skipped = picked.filter((r) => !(r.hours > 0));
+    if (!serve || !ok.length) { out.innerHTML = '<span class="muted">מסמנים שתי מנות או יותר ושעת הגשה, ולוח הזמנים המשותף מופיע כאן.</span>'; return; }
+    const items = [];
+    for (const r of ok) {
+      const outAt = serve - (buffer + (r.rest || 0)) * 60000, inAt = outAt - r.hours * 3600000;
+      items.push([`להכניס: ${r.name}`, inAt, r.smokerTemp], [`להוציא למנוחה: ${r.name}`, outAt]);
+    }
+    items.push(['הדלקת המעשנה', Math.min(...items.map((x) => x[1])) - preheat * 60000], ['הגשה', serve]);
+    items.sort((a, b) => a[1] - b[1]);
+    lastPlan = { name: 'ארוחה במעשנה', items };
+    const temps = [...new Set(ok.map((r) => r.smokerTemp).filter(Boolean))].sort((a, b) => a - b);
+    const notes = [];
+    if (items[0][1] < Date.now()) notes.push('שעת ההדלקה כבר עברה. צריך לדחות את ההגשה או לוותר על מנה ארוכה.');
+    if (temps.length > 1) notes.push(`המתכונים דורשים טמפרטורות שונות (${temps.map((t) => t + '°C').join(', ')}), ובמעשנה אחת יש טמפרטורה אחת. מכוונים לפי הנתח הגדול. מנה שהמתכון שלה חם יותר תצטרך יותר זמן, ולכן מקדימים אותה ועוקבים במדחום; מנה שהמתכון שלה קר יותר תהיה מוכנה מוקדם יותר.`);
+    if (skipped.length) notes.push(`בלי זמן בישול במתכון, ולכן לא נכללו: ${skipped.map((r) => r.name).join(', ')}.`);
+    out.innerHTML = `<table><tbody>${items.map(([t, at, temp]) => `<tr><td>${esc(t)}${temp ? ` <span class="muted small">(${temp}°C)</span>` : ''}</td><td class="n">${dayLabel(at)}</td><td class="n"><strong>${fmtTime(at)}</strong></td></tr>`).join('')}</tbody></table>${notes.map((n) => `<p class="note warn">${esc(n)}</p>`).join('')}`;
+  },
   plan(f, out) {
     lastPlan = computePlan(f);
     if (!lastPlan) { out.innerHTML = '<span class="muted">ממלאים זמן בישול ושעת הגשה, ולוח הזמנים מופיע כאן.</span>'; return; }
@@ -1148,7 +1381,10 @@ const ACT = {
     if (!confirm('לבטל את הבישול? השלבים והמדידות יימחקו בלי תיעוד ביומן.')) return;
     S.cook = null; setWake(false); save(); render();
   },
-  'step-toggle': (i) => { const s = S.cook.steps[+i]; s.at = s.at ? null : Date.now(); save(); render(); },
+  'step-toggle': (i) => markStep(+i),
+  'step-done': (i) => markStep(+i),
+  'step-timer': (i) => { const x = S.cook.steps[+i], m = planSteps(S.cook.steps)[+i].min; if (m) addTimer(m, x.t.length > 40 ? x.t.slice(0, 38) + '…' : x.t); },
+  'water-done': () => { const w = S.cook.water; w.next = Date.now() + w.every * 60000; w.fired = false; save(); render(); toast('התזכורת הבאה בעוד שעתיים'); },
   'timer-add': (m) => addTimer(+m),
   'timer-hours': (_, el) => { const h = +el.value; if (h > 0) addTimer(h * 60, `טיימר ${hoursLabel(h)}`); },
   'timer-del': (id) => { S.cook.timers = S.cook.timers.filter((t) => t.id !== id); save(); render(); },
@@ -1239,6 +1475,10 @@ $('#sheet').addEventListener('close', () => { $('#sheet').innerHTML = ''; });
       if (hit && round[r.smokerTemp]) r.smokerTemp = round[r.smokerTemp];
     }
     S.v = 2; save();
+  }
+  if (S.v < 3) {
+    for (const r of S.recipes) if (typeof r.ingredients === 'string') r.ingredients = r.ingredients.replace('25 גרם מלח משמר ורוד', '20 גרם מלח משמר ורוד');
+    S.v = 3; save();
   }
   const fresh = PACK_RECIPES.filter((r) => !S.packs.includes(r.pack));
   if (fresh.length) {

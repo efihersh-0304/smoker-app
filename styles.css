@@ -195,3 +195,15 @@ details.card[open] > summary::after { content: "－"; }
   .toast { animation: rise .2s ease-out; }
   @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 }
+
+/* cook guidance */
+.card.now { border-inline-start: 4px solid var(--accent); }
+.now-step { font-size: 1.1rem; font-weight: 600; margin: 8px 0; }
+.next-step { margin-top: 12px; padding: 10px 12px; background: var(--surface-2); border-radius: 10px; display: grid; gap: 4px; }
+.milestones { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 6px; }
+.milestones p { margin: 0; }
+.picklist { max-height: 240px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; padding: 4px 10px; margin: 8px 0; }
+.picklist label { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.picklist label:last-child { border-bottom: 0; }
+ul.plain { margin: 4px 0 12px; padding-inline-start: 20px; display: grid; gap: 6px; }
+details h3 { margin: 14px 0 4px; }
