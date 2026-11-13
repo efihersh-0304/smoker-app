@@ -905,7 +905,7 @@ function startCook(id) {
     S.cook.water = { every: 120, next: hasIn ? null : Date.now() + 120 * 60000, fired: false };
   }
   setWake(true, true);
-  save(); closeSheet(); tab = 'cook'; render();
+  save(); closeSheet(); tab = 'cook'; render(); pbConnect();
 }
 function analyze(c) {
   const m = c.log.filter((r) => r.meat != null).sort((a, b) => a.at - b.at);
@@ -999,6 +999,8 @@ function viewCook() {
       <p class="muted small">הבישול נשמר במכשיר ונשאר פתוח גם אם סוגרים את האפליקציה. הוא מסתיים רק בלחיצה על "סיום ותיעוד ביומן" או על "ביטול".</p>
     </div>
 
+    ${pbCard(c)}
+
     ${stageCard(c)}
 
     ${guide(c)}
@@ -1060,13 +1062,128 @@ function addLog(f) {
   const d = Object.fromEntries(new FormData(f));
   const smoker = num(d.smoker), meat = num(d.meat), note = d.note.trim();
   if (smoker == null && meat == null && !note) { toast('אין מה לרשום: צריך טמפרטורה אחת לפחות או הערה'); return; }
-  const c = S.cook;
-  c.log.push({ at: Date.now(), smoker, meat, note });
+  pushLog(smoker, meat, note);
+}
+// The meat temperature the current step is waiting for, if it has one and has not already been announced.
+function pendingCue(c) {
   const i = c.steps.findIndex((x) => !x.at), cue = i >= 0 ? planSteps(c.steps)[i].meat : null;
-  const hit = meat != null && cue && meat >= cue && c.cued !== i;
-  if (hit) c.cued = i;
-  save(); render();
-  if (hit) fireAlarm(`הבשר ב-${meat}°C. ${c.steps[i].t}`, 'נקודת ציון בבישול');
+  return cue && c.cued !== i ? { i, cue } : null;
+}
+function pushLog(smoker, meat, note, auto = false) {
+  const c = S.cook, p = pendingCue(c);
+  c.log.push({ at: Date.now(), smoker, meat, note, ...(auto ? { auto: true } : {}) });
+  const hit = meat != null && p && meat >= p.cue;
+  if (hit) c.cued = p.i;
+  save();
+  if (auto) softRender(); else render();
+  if (hit) fireAlarm(`הבשר ב-${meat}°C. ${c.steps[p.i].t}`, 'נקודת ציון בבישול');
+}
+
+/* ---------- live readings from the Pit Boss cloud relay (read-only) ---------- */
+// Unofficial: the smoker pushes its status to Pit Boss's relay, and anyone holding the device ID can listen.
+// This code only listens. It never sends a command, so it cannot change the temperature or switch anything.
+// Frame layouts follow the open-source pytboss project (github.com/dknowles2/pytboss).
+const PB_HOST = 'wss://socket.dansonscorp.com';
+// [probe offsets], set-temp offset, smoker-temp offset, unit-flag offset, converts: value arrives in °F even when the display is °C
+const PB_A = (conv) => ({ probes: [5, 8, 11, 14], set: 20, grill: 23, flag: 26, conv });
+const PB_B = (conv) => ({ probes: [8, 11, 14, 17], set: 23, grill: 26, flag: 29, conv });
+const PB_C = (n) => ({ probes: [5, 8, 11, 14].slice(0, n), set: 14, grill: 17, flag: 20, conv: true });
+const PB_BOARDS = {
+  PBV: PB_A(true), PBV2: PB_A(true), PBL3: PB_A(true), PBC: PB_A(false), PBC2: PB_A(false), PBG: PB_A(false), PBL: PB_A(false), PBP: PB_A(false), PBL2: PB_A(false),
+  PBA: PB_B(true), PBE: PB_B(true), PBT: PB_B(true), PBB: PB_B(false), PBD: PB_B(false),
+  PBM: PB_C(3), PBM2: PB_C(3), PBVA: PB_C(3),
+};
+const pbBoard = (id) => PB_BOARDS[String(id || '').split('-')[0]] || null;
+function pbDecode(frame, L) {
+  if (typeof frame !== 'string' || !frame.startsWith('FE0C')) return null;
+  const b = []; for (let i = 0; i < frame.length; i += 2) b.push(parseInt(frame.slice(i, i + 2), 16));
+  if (b.length <= L.flag || b.some(Number.isNaN)) return null;
+  const isF = b[L.flag] === 1;
+  const t = (o) => {
+    const v = b[o] * 100 + b[o + 1] * 10 + b[o + 2];
+    if (v === 960 || v === 0 || v > 999) return null; // 960 marks a probe that is not plugged in
+    return isF || L.conv ? Math.round((v - 32) / 1.8) : v;
+  };
+  return { probes: L.probes.map(t), set: t(L.set), smoker: t(L.grill) };
+}
+const pb = { ws: null, state: 'off', last: null, at: 0, logged: 0, tries: 0, timer: null, dirty: false };
+function pbConnect() {
+  const cfg = S.pb; clearTimeout(pb.timer);
+  if (!cfg?.on || !cfg.id || !S.cook || pb.ws) return;
+  const L = pbBoard(cfg.id);
+  if (!L) { pb.state = 'board'; pbPaint(); return; }
+  pb.state = 'connecting'; pbPaint();
+  let ws;
+  try { ws = new WebSocket(`${PB_HOST}/to/${encodeURIComponent(cfg.id)}`); } catch { pb.state = 'error'; pbPaint(); return; }
+  pb.ws = ws;
+  ws.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    const frames = Array.isArray(m?.status) ? m.status : [];
+    const r = frames.map((f) => pbDecode(f, L)).find(Boolean);
+    if (!r) { if (pb.state === 'connecting') { pb.state = 'waiting'; pbPaint(); } return; }
+    pb.last = r; pb.at = Date.now(); pb.state = 'live'; pb.tries = 0;
+    pbReading(r);
+  };
+  ws.onopen = () => { if (pb.state === 'connecting') { pb.state = 'waiting'; pbPaint(); } };
+  ws.onclose = () => {
+    if (pb.ws !== ws) return;
+    pb.ws = null;
+    if (!S.pb?.on || !S.cook) { pb.state = 'off'; pbPaint(); return; }
+    pb.state = pb.at && Date.now() - pb.at < 180000 ? 'live' : 'error'; pbPaint();
+    pb.timer = setTimeout(pbConnect, Math.min(30000, 2000 * 2 ** pb.tries++));
+  };
+}
+function pbStop() {
+  clearTimeout(pb.timer);
+  const ws = pb.ws; pb.ws = null; pb.state = 'off'; pb.last = null; pb.at = 0;
+  try { ws?.close(); } catch { /* already closed */ }
+}
+const pbMeat = (r) => r.probes[(S.pb?.probe || 1) - 1] ?? null;
+function pbReading(r) {
+  const c = S.cook; if (!c) return;
+  const meat = pbMeat(r), p = pendingCue(c), now = Date.now();
+  // Log every five minutes, and at once when the meat reaches the temperature the current step waits for.
+  if (r.smoker != null && (now - pb.logged >= 300000 || (meat != null && p && meat >= p.cue))) {
+    pb.logged = now;
+    pushLog(r.smoker, meat, '', true);
+  } else pbPaint();
+}
+// Redraw without wiping a field someone is typing in.
+function softRender() {
+  if (tab !== 'cook' || document.activeElement?.matches?.('#main input:not([type=checkbox]), #main textarea, #main select')) { pb.dirty = true; pbPaint(); return; }
+  pb.dirty = false; render();
+}
+function pbPaint() { const el = $('#pb'); if (el && tab === 'cook' && S.cook && !el.contains(document.activeElement)) el.outerHTML = pbCard(S.cook); }
+function pbCard(c) {
+  const cfg = S.pb || {}, r = pb.last, stale = pb.at && Date.now() - pb.at > 180000;
+  const info = planSteps(c.steps), i = c.steps.findIndex((x) => !x.at);
+  const want = i >= 0 ? info.slice(0, i + 1).reduce((a, p) => p.dial ?? a, null) : null;
+  const STATE = {
+    off: '', connecting: 'מתחבר…', waiting: 'מחובר, ממתין לנתונים מהמעשנה. כשהיא דולקת, הנתון הראשון מגיע בתוך דקה בערך.',
+    error: 'אין חיבור כרגע. מנסה שוב לבד. כדאי לוודא שמזהה המכשיר נכון ושהמעשנה מחוברת לרשת.',
+    board: 'הקידומת של המזהה (האותיות שלפני המקף) לא מוכרת לאפליקציה, ולכן אי אפשר לפענח את הנתונים של הדגם הזה.', live: '',
+  };
+  const probes = r ? r.probes.map((v, k) => (v == null ? '' : `<span class="chip">חיישן ${k + 1}: ${v}°C</span>`)).join('') : '';
+  let body;
+  if (!cfg.on) {
+    body = `<p class="muted">קריאה אוטומטית של טמפרטורת המעשנה והחיישנים, במקום להקליד אותן. החיבור אינו רשמי ועלול להפסיק לעבוד; הוא לקריאה בלבד, והאפליקציה לא יכולה לשנות דבר במעשנה.</p>
+      <form data-form="pb" class="row">
+        <div class="grow">${inp('id', cfg.id || '', 'placeholder="מזהה המכשיר, למשל PBV-1A2B3C" aria-label="מזהה המכשיר" autocapitalize="characters" autocomplete="off" spellcheck="false" dir="ltr" required')}</div>
+        <button class="btn primary">חיבור</button>
+      </form>
+      <p class="muted small">המזהה הוא שם הבלוטות' של המעשנה. הוא מופיע באפליקציית Pit Boss בלשונית GRILLS, וברשימת הבלוטות' של הטלפון. הוא נשמר רק במכשיר הזה. מי שמחזיק בו יכול לתקשר עם המעשנה, ולכן לא משתפים אותו.</p>`;
+  } else {
+    body = `${r ? `<div class="pb-now"><div><div class="big">${r.smoker ?? '–'}°</div><div class="muted small">מעשנה${r.set != null ? ` · מכוונת ל-${r.set}°C` : ''}</div></div>
+        <div><div class="big">${pbMeat(r) ?? '–'}°</div><div class="muted small">בשר (חיישן ${cfg.probe || 1})</div></div></div>
+        <div class="chips">${probes}</div>` : ''}
+      ${STATE[pb.state] ? `<p class="note ${pb.state === 'error' || pb.state === 'board' ? 'warn' : ''}">${STATE[pb.state]}</p>` : ''}
+      ${r && stale ? `<p class="note warn">הנתון האחרון התקבל ב-${fmtTime(pb.at)}. ייתכן שהמעשנה כבויה או שהחיבור נפל.</p>` : ''}
+      ${r && !stale ? `<p class="muted small">עודכן ב-${fmtTime(pb.at)}. מדידה נרשמת לבד כל חמש דקות.</p>` : ''}
+      ${r && want && r.set != null && Math.abs(r.set - want) > 5 ? `<p class="note warn">המעשנה מכוונת ל-${r.set}°C, והמתכון מבקש בשלב הזה ${want}°C.</p>` : ''}
+      ${r && r.probes.filter((v) => v != null).length > 1 || (r && pbMeat(r) == null) ? field('איזה חיישן נעוץ בבשר', `<select data-act="pb-probe">${r.probes.map((v, k) => `<option value="${k + 1}" ${(cfg.probe || 1) === k + 1 ? 'selected' : ''}>חיישן ${k + 1}${v == null ? ' (לא מחובר)' : ` · ${v}°C`}</option>`).join('')}</select>`) : ''}
+      <div class="row between"><span class="muted small" dir="ltr">${esc(cfg.id)}</span><button class="btn sm" data-act="pb-off">ניתוק</button></div>`;
+  }
+  return `<div class="card" id="pb"><div class="row between"><h3>חיבור לפיט בוס</h3>${cfg.on && pb.state === 'live' && !stale ? '<span class="chip live">חי</span>' : ''}</div>${body}</div>`;
 }
 function finishCook() {
   const c = S.cook; if (!c) return;
@@ -1121,7 +1238,7 @@ async function setWake(on, quiet = false) {
 }
 let stageDrawn = 0;
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') { if (wakeWanted) setWake(true, true); stageDrawn = 0; tick(); }
+  if (document.visibilityState === 'visible') { if (wakeWanted) setWake(true, true); stageDrawn = 0; pb.tries = 0; pbConnect(); tick(); }
 });
 
 function tick() {
@@ -1137,6 +1254,7 @@ function tick() {
   if (tab === 'cook' && now - stageDrawn > 30000) {
     stageDrawn = now;
     const el = $('#stage'); if (el) el.outerHTML = stageCard(S.cook);
+    if (pb.dirty) softRender(); else pbPaint();
   }
   const due = S.cook.timers.filter((t) => !t.fired && t.end <= now);
   if (due.length) {
@@ -1235,7 +1353,7 @@ async function saveJournal(f) {
   if (d.fromCook && S.cook) {
     entry.log = S.cook.log; entry.targetTemp = S.cook.targetTemp;
     entry.steps = S.cook.steps;
-    S.cook = null; setWake(false);
+    S.cook = null; setWake(false); pbStop();
   }
   const i = S.journal.findIndex((x) => x.id === entry.id);
   if (i >= 0) S.journal[i] = entry; else S.journal.push(entry);
@@ -1512,7 +1630,7 @@ function planIcs() {
 }
 function exportBackup() {
   S.lastBackup = Date.now();
-  download(`smoker-backup-${isoDate(Date.now())}.json`, JSON.stringify({ app: 'smoker', exported: new Date().toISOString(), data: S }), 'application/json');
+  download(`smoker-backup-${isoDate(Date.now())}.json`, JSON.stringify({ app: 'smoker', exported: new Date().toISOString(), data: { ...S, pb: undefined } }), 'application/json');
   save(); render();
 }
 async function importBackup(file) {
@@ -1521,7 +1639,7 @@ async function importBackup(file) {
     const d = raw?.app === 'smoker' ? raw.data : null;
     if (!d || !Array.isArray(d.recipes) || !Array.isArray(d.journal) || !Array.isArray(d.ideas)) throw new Error('format');
     if (!confirm(`בקובץ: ${d.recipes.length} מתכונים, ${d.journal.length} רישומי יומן, ${d.ideas.length} רעיונות.\nהשחזור יחליף את כל הנתונים שבמכשיר. להמשיך?`)) return;
-    S = { ...blank(), ...d, recipes: d.recipes, journal: d.journal, ideas: d.ideas };
+    S = { ...blank(), ...d, recipes: d.recipes, journal: d.journal, ideas: d.ideas, pb: S.pb };
     await save(); render(); toast('הנתונים שוחזרו');
   } catch { toast('הקובץ אינו קובץ גיבוי תקין של האפליקציה'); }
 }
@@ -1558,7 +1676,7 @@ const ACT = {
   'cook-finish': finishCook,
   'cook-cancel': () => {
     if (!confirm('לבטל את הבישול? השלבים והמדידות יימחקו בלי תיעוד ביומן.')) return;
-    S.cook = null; setWake(false); save(); render();
+    S.cook = null; setWake(false); pbStop(); save(); render();
   },
   'step-toggle': (i) => markStep(+i),
   'step-done': (i) => markStep(+i),
@@ -1585,6 +1703,8 @@ const ACT = {
   },
   'season-toggle': (i, el) => { S.seasoning[i] = el.checked; save(); render(); },
   'plan-ics': planIcs,
+  'pb-off': () => { S.pb = { ...S.pb, on: false }; save(); pbStop(); render(); },
+  'pb-probe': (_, el) => { S.pb.probe = +el.value; save(); pbPaint(); },
   'backup-export': exportBackup,
   'packs-restore': () => {
     const have = new Set(S.recipes.map((r) => r.name));
@@ -1595,7 +1715,7 @@ const ACT = {
     save(); render(); toast(add.length === 1 ? 'נוסף מתכון אחד' : `נוספו ${add.length} מתכונים`);
   },
 };
-const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle', 'timer-hours']);
+const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle', 'timer-hours', 'pb-probe']);
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
@@ -1627,6 +1747,11 @@ document.addEventListener('submit', (e) => {
     case 'import': runImport(f); break;
     case 'cook-pick': startCook(d.id); break;
     case 'log': addLog(f); break;
+    case 'pb': {
+      const id = d.id.trim().toUpperCase();
+      if (!/^[A-Z0-9][A-Z0-9_-]{3,39}$/.test(id)) { toast('המזהה נראה לא תקין. הוא נראה בערך כך: PBV-1A2B3C'); break; }
+      S.pb = { ...(S.pb || {}), id, on: true, probe: S.pb?.probe || 1 }; save(); pb.logged = 0; pbConnect(); render(); break;
+    }
     case 'timer': { const m = num(d.min); if (m > 0) addTimer(m, d.label.trim()); else toast('צריך מספר דקות'); break; }
     case 'journal': saveJournal(f); break;
     case 'idea': S.ideas.push({ id: uid(), text: d.text.trim(), created: Date.now() }); save(); render(); toast('הרעיון נשמר'); break;
@@ -1645,7 +1770,7 @@ $('#sheet').addEventListener('close', () => { $('#sheet').innerHTML = ''; });
     console.error(err);
     toast('אין גישה לאחסון במכשיר. הנתונים לא יישמרו (ייתכן שזה מצב גלישה פרטית).');
   }
-  if (S.cook) { tab = 'cook'; if (S.cook.wake !== false) setWake(true, true); }
+  if (S.cook) { tab = 'cook'; if (S.cook.wake !== false) setWake(true, true); pbConnect(); }
   // v2: pack recipes first shipped with Fahrenheit dial settings; the dial is in Celsius.
   if (S.v < 2) {
     const round = { 107: 110, 121: 120, 135: 135, 149: 150 };

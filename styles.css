@@ -236,3 +236,5 @@ details h3 { margin: 14px 0 4px; }
 .st-seg.done { fill: var(--line); }
 .st-seg.cur { fill: var(--accent); stroke: var(--accent); }
 .st-now { fill: var(--text); stroke: var(--text); stroke-width: 1.5; }
+.pb-now { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: center; margin: 6px 0; }
+.chip.live { background: var(--good); color: var(--bg); }
