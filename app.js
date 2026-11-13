@@ -290,6 +290,8 @@ function findTemps(text) {
 function findHours(lines) {
   let best = null;
   const up = (v) => { if (v > 0 && v <= 30) best = Math.max(best ?? 0, v); };
+  const stated = lines.find((l) => /^\d+(?:\.\d+)? hours$/.test(l)); // cook time declared by the page itself
+  if (stated) return Math.round(parseFloat(stated) * 10) / 10;
   for (const l of lines) {
     if (REST_RE.test(l)) continue;
     if (/שעתיים/.test(l)) up(2);
@@ -341,7 +343,8 @@ function jsonLdToText(text) {
 }
 
 function parseRecipeText(raw, source = '') {
-  const text = (jsonLdToText(raw) || raw).replace(/\r/g, '').replace(/[‎‏]/g, '');
+  const text = (jsonLdToText(raw) || raw).replace(/\r/g, '').replace(/[‎‏]/g, '')
+    .replace(/℉/g, '°F').replace(/℃/g, '°C').replace(/\[([^\]\n]+)\]\(https?:[^)\s]+\)/g, '$1');
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return null;
   const name = stripLead(lines[0]).replace(/^מתכון ל/, '').slice(0, 80);
@@ -369,7 +372,7 @@ function parseRecipeText(raw, source = '') {
     name, cut, wood, weight: findWeight(text), smokerTemp: t.smoker, targetTemp: t.target,
     hours: findHours(lines), rest: findRest(lines),
     ingredients: sec.ingredients.map(stripLead).join('\n'),
-    steps: sec.steps.map(stripLead).filter(Boolean),
+    steps: sec.steps.flatMap((l) => (/\s2[.)]\s/.test(l) ? l.split(/\s+(?=\d{1,2}[.)]\s)/) : [l])).map(stripLead).filter(Boolean),
     notes: notes.join('\n'), source: source.trim(),
   };
   const missing = [
@@ -382,21 +385,65 @@ function parseRecipeText(raw, source = '') {
   return { recipe, hint };
 }
 
+// Readable text of a fetched page: structured recipe data if the page has it, otherwise headings, paragraphs and list items.
+function htmlToText(html) {
+  const ld = jsonLdToText(html);
+  if (ld) return ld;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const title = (doc.querySelector('h1')?.textContent || doc.title || '').replace(/\s+/g, ' ').trim();
+  doc.querySelectorAll('script,style,noscript,nav,header,footer,aside,form,svg,iframe,button').forEach((n) => n.remove());
+  const root = doc.querySelector('[itemtype*="Recipe"]') || doc.querySelector('article') || doc.querySelector('main') || doc.body;
+  const out = [];
+  root?.querySelectorAll('h1,h2,h3,h4,p,li').forEach((n) => {
+    if (n.querySelector('p,li')) return;
+    const t = n.textContent.replace(/\s+/g, ' ').trim();
+    if (t && t !== title && t !== out[out.length - 1]) out.push(t);
+  });
+  return [title, ...out.slice(0, 400)].filter(Boolean).join('\n');
+}
+const FETCH_ERR = {
+  'bad-url': 'הקישור לא תקין',
+  site: 'האתר סירב להחזיר את הדף. אפשר להעתיק את הטקסט ולהדביק ידנית.',
+  'not-html': 'הקישור לא מוביל לדף מתכון',
+  timeout: 'האתר לא ענה בזמן. אפשר לנסות שוב או להדביק ידנית.',
+};
+async function importFetch(_, el) {
+  const f = el.form;
+  const link = (f.source.value.trim() || f.text.value.trim());
+  if (!/^https?:\/\/\S+$/i.test(link)) { toast('מדביקים קודם קישור למתכון בשדה הקישור'); f.source.focus(); return; }
+  if (!navigator.onLine) { toast('אין חיבור לרשת'); return; }
+  const label = el.textContent;
+  el.disabled = true; el.textContent = 'מושך את המתכון…';
+  try {
+    const res = await fetch('api/recipe?url=' + encodeURIComponent(link), { cache: 'no-store' });
+    if (res.status === 404) { toast('משיכה מקישור פעילה רק בגרסה שמותקנת מ-Netlify. כאן אפשר להדביק את הטקסט.'); return; }
+    const data = await res.json();
+    if (!res.ok) { toast(FETCH_ERR[data.error] || 'המשיכה נכשלה. אפשר להדביק את הטקסט ידנית.'); return; }
+    const parsed = parseRecipeText(htmlToText(data.html), data.url || link);
+    if (!parsed || !parsed.recipe.name || (!parsed.recipe.steps.length && !parsed.recipe.ingredients)) {
+      toast('הדף נמשך, אבל לא נמצא בו מתכון. אפשר להדביק את הטקסט ידנית.'); return;
+    }
+    recipeForm(parsed.recipe, '', parsed.hint);
+  } catch { toast('המשיכה נכשלה. אפשר להדביק את הטקסט ידנית.'); }
+  finally { if (el.isConnected) { el.disabled = false; el.textContent = label; } }
+}
+
 function importSheet() {
   openSheet('ייבוא מתכון ממקור', `
-    <p class="muted">מחפשים מתכון ברשת, מעתיקים את הטקסט שלו ומדביקים כאן. האפליקציה מפרקת אותו לשדות של מתכון, ואתה מאשר לפני השמירה.</p>
+    <p class="muted">מחפשים מתכון ברשת ומדביקים כאן את הקישור אליו. האפליקציה מושכת את הדף, מפרקת אותו לשדות של מתכון, ואתה מאשר לפני השמירה. אם אתר חוסם משיכה, מדביקים את הטקסט עצמו.</p>
     <form data-form="import">
       ${field('מה מחפשים?', inp('q', '', 'placeholder="למשל: צלעות טלה מעושנות" enterkeyhint="search"'))}
       <div class="row">
         <button type="button" class="btn grow" data-act="import-search" data-arg="google">חיפוש ב-Google</button>
         <button type="button" class="btn grow" data-act="import-search" data-arg="ddg">חיפוש ב-DuckDuckGo</button>
       </div>
-      ${field('קישור למקור (לא חובה)', inp('source', '', 'type="url" inputmode="url" placeholder="https://..."'))}
-      ${field('טקסט המתכון', area('text', '', 'rows="9" required placeholder="מדביקים כאן את המתכון: שם, מרכיבים, אופן ההכנה..."'))}
+      ${field('קישור למתכון', inp('source', '', 'type="url" inputmode="url" placeholder="https://..."'))}
+      <button type="button" class="btn primary block" data-act="import-fetch">משיכת המתכון מהקישור</button>
+      ${field('או טקסט המתכון', area('text', '', 'rows="7" placeholder="מדביקים כאן את המתכון: שם, מרכיבים, אופן ההכנה..."'))}
       <button type="button" class="btn block" data-act="import-paste">הדבקה מהלוח</button>
-      <button class="btn primary block">פענוח ומילוי המתכון</button>
+      <button class="btn block">פענוח הטקסט ומילוי המתכון</button>
     </form>
-    <p class="muted small">האפליקציה עצמה לא שולחת כלום לרשת. החיפוש נפתח בדפדפן, והפענוח נעשה במכשיר.</p>`);
+    <p class="muted small">במשיכה מקישור נשלחת כתובת הדף בלבד לשרת של האפליקציה, והוא מחזיר את תוכן הדף. הפענוח נעשה במכשיר, ושום מידע אחר לא יוצא ממנו.</p>`);
 }
 function importSearch(engine, el) {
   const q = el.form.q.value.trim();
@@ -409,12 +456,12 @@ async function importPaste(_, el) {
     const t = await navigator.clipboard.readText();
     if (!t.trim()) { toast('הלוח ריק'); return; }
     el.form.text.value = t;
-    if (/^https?:\/\/\S+$/i.test(t.trim())) toast('בלוח יש רק קישור. צריך להעתיק את טקסט המתכון עצמו.');
+    if (/^https?:\/\/\S+$/i.test(t.trim())) { el.form.text.value = ''; el.form.source.value = t.trim(); toast('בלוח יש קישור. לוחצים על "משיכת המתכון מהקישור".'); }
   } catch { toast('אין גישה ללוח. אפשר להדביק ידנית בתיבת הטקסט.'); }
 }
 function runImport(f) {
   const d = Object.fromEntries(new FormData(f));
-  if (/^https?:\/\/\S+$/i.test(d.text.trim())) { toast('הודבק רק קישור. האפליקציה לא קוראת אתרים; צריך להדביק את טקסט המתכון.'); return; }
+  if (!d.text.trim() || /^https?:\/\/\S+$/i.test(d.text.trim())) { importFetch('', f.querySelector('[data-act="import-fetch"]')); return; }
   const res = parseRecipeText(d.text, d.source);
   if (!res || !res.recipe.name) { toast('לא הצלחתי לפענח את הטקסט'); return; }
   recipeForm(res.recipe, '', res.hint);
@@ -937,6 +984,7 @@ const ACT = {
   'recipe-import': () => importSheet(),
   'import-search': importSearch,
   'import-paste': importPaste,
+  'import-fetch': importFetch,
   'recipe-open': openRecipe,
   'recipe-edit': (id) => recipeForm(S.recipes.find((x) => x.id === id)),
   'recipe-share': shareRecipe,

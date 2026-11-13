@@ -1,0 +1,3 @@
+# Static site, no build step. The function in netlify/functions fetches recipe pages for the importer.
+[build]
+  publish = "."
