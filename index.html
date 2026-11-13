@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'">
+<title>המעשנה</title>
+<meta name="theme-color" content="#1a1512">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="המעשנה">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <h1 id="title">המעשנה</h1>
+  <span id="cook-pill" class="pill" hidden></span>
+</header>
+
+<main id="main" tabindex="-1"></main>
+
+<nav class="tabs" aria-label="ניווט ראשי">
+  <button data-act="tab" data-arg="recipes"><span aria-hidden="true">📖</span>מתכונים</button>
+  <button data-act="tab" data-arg="cook"><span aria-hidden="true">🔥</span>בישול</button>
+  <button data-act="tab" data-arg="journal"><span aria-hidden="true">📓</span>יומן</button>
+  <button data-act="tab" data-arg="ideas"><span aria-hidden="true">💡</span>רעיונות</button>
+  <button data-act="tab" data-arg="tools"><span aria-hidden="true">🧰</span>כלים</button>
+</nav>
+
+<dialog id="sheet" class="sheet"></dialog>
+<dialog id="alarm" class="alarm">
+  <h2>⏰ הטיימר הסתיים</h2>
+  <p id="alarm-text"></p>
+  <button class="btn primary" data-act="alarm-dismiss">הבנתי</button>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
