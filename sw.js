@@ -1,5 +1,5 @@
 // Offline shell. Bump VERSION whenever app files change.
-const VERSION = 'smoker-v15';
+const VERSION = 'smoker-v16';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -28,6 +28,13 @@ self.addEventListener('fetch', (e) => {
       return cached || fresh;
     })
   );
+});
+
+// Alarms sent by the server while the app is closed or the phone is locked.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data.json(); } catch { /* empty or malformed push */ }
+  e.waitUntil(self.registration.showNotification(d.title || 'המעשנה', { body: d.body || '', tag: d.tag || 'smoker-timer', icon: 'icon-192.png', badge: 'icon-192.png', renotify: true, dir: 'rtl', lang: 'he' }));
 });
 
 self.addEventListener('notificationclick', (e) => {

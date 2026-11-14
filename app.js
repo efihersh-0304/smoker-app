@@ -298,6 +298,7 @@ let audio = null;
 let lastPlan = null;
 
 async function save() {
+  pushSyncSoon();
   try { await store.set('state', S); }
   catch (err) { console.error(err); toast('השמירה נכשלה. כדאי לייצא גיבוי עכשיו.'); }
 }
@@ -986,7 +987,6 @@ function viewCook() {
   const a = analyze(c), plan = stageTimes(c);
   const done = c.steps.filter((s) => s.at).length;
   const timers = [...c.timers].sort((x, y) => x.end - y.end);
-  const notifState = !('Notification' in window) ? 'none' : Notification.permission;
   return `
     <div class="card">
       <div class="row between"><h2>${esc(c.name)}</h2><span class="muted">התחיל ב-${fmtTime(c.start)}${dayLabel(c.start) !== 'היום' ? ' ' + dayLabel(c.start) : ''}</span></div>
@@ -1030,8 +1030,7 @@ function viewCook() {
         <span class="grow">${esc(t.label)} <span class="muted">· ${fmtTime(t.end)}</span></span>
         <button class="icon-btn" data-act="timer-del" data-arg="${t.id}" aria-label="מחיקת טיימר">✕</button>
       </div>`).join('')}
-      ${notifState === 'default' ? '<button class="btn sm" data-act="notif-enable">הפעלת התראות מערכת</button>' : ''}
-      <p class="muted small">הטיימר מצלצל כשהאפליקציה פתוחה. כשהטלפון נעול אין הבטחה שתישמע התראה, ולכן לבישול ארוך כדאי להשאיר את המסך דולק או לייצא את לוח הזמנים ליומן (בלשונית "כלים").</p>
+      ${pushBlock()}
     </div>
 
     <div class="card">
@@ -1085,18 +1084,34 @@ function pushLog(smoker, meat, note, auto = false) {
 // Frame layouts follow the open-source pytboss project (github.com/dknowles2/pytboss).
 const PB_HOST = 'wss://socket.dansonscorp.com';
 // [probe offsets], set-temp offset, smoker-temp offset, unit-flag offset, converts: value arrives in °F even when the display is °C
-const PB_A = (conv) => ({ probes: [5, 8, 11, 14], set: 20, grill: 23, flag: 26, conv });
-const PB_B = (conv) => ({ probes: [8, 11, 14, 17], set: 23, grill: 26, flag: 29, conv });
-const PB_C = (n) => ({ probes: [5, 8, 11, 14].slice(0, n), set: 14, grill: 17, flag: 20, conv: true });
+// st: where the on/off flag sits in the status frame; the error flags follow it.
+const PB_A = (conv) => ({ probes: [5, 8, 11, 14], set: 20, grill: 23, flag: 26, conv, st: 24 });
+const PB_B = (conv) => ({ probes: [8, 11, 14, 17], set: 23, grill: 26, flag: 29, conv, st: 27 });
+const PB_C = (st) => ({ probes: [5, 8, 11], set: 14, grill: 17, flag: 20, conv: true, st });
 const PB_BOARDS = {
   PBV: PB_A(true), PBV2: PB_A(true), PBL3: PB_A(true), PBC: PB_A(false), PBC2: PB_A(false), PBG: PB_A(false), PBL: PB_A(false), PBP: PB_A(false), PBL2: PB_A(false),
   PBA: PB_B(true), PBE: PB_B(true), PBT: PB_B(true), PBB: PB_B(false), PBD: PB_B(false),
-  PBM: PB_C(3), PBM2: PB_C(3), PBVA: PB_C(3),
+  PBM: PB_C(18), PBM2: PB_C(18), PBVA: PB_C(24),
 };
-const pbBoard = (id) => PB_BOARDS[String(id || '').split('-')[0]] || null;
+// For an ID whose prefix is not in the table: one representative of each distinct data format, to try by hand.
+const PB_PICK = [['PBV', 'סוג א'], ['PBL', 'סוג ב'], ['PBA', 'סוג ג'], ['PBB', 'סוג ד'], ['PBVA', 'סוג ה'], ['PBM', 'סוג ו']];
+const pbBoard = (cfg) => PB_BOARDS[cfg?.board] || PB_BOARDS[String(cfg?.id || '').split('-')[0]] || null;
+const pbHex = (frame) => { const b = []; for (let i = 0; i < frame.length; i += 2) b.push(parseInt(frame.slice(i, i + 2), 16)); return b; };
+const PB_ERR = [
+  ['noPellets', 8, 'נגמרו הפלטים. למלא את המכל, אחרת האש תכבה.'],
+  ['highTemp', 4, 'חום יתר במעשנה. לבדוק שאין שומן שנדלק, ולא לפתוח את הדלת בבת אחת.'],
+  ['fan', 5, 'תקלה במאוורר.'], ['igniter', 6, 'תקלה במצת.'], ['auger', 7, 'תקלה במנוע ההזנה של הפלטים.'],
+  ['err1', 1, 'המעשנה מדווחת על שגיאה (ERR1).'], ['err2', 2, 'המעשנה מדווחת על שגיאה (ERR2).'], ['err3', 3, 'המעשנה מדווחת על שגיאה (ERR3).'],
+];
+function pbStatus(frame, L) {
+  if (typeof frame !== 'string' || !frame.startsWith('FE0B')) return null;
+  const b = pbHex(frame);
+  if (b.length <= L.st + 8 || b.some(Number.isNaN)) return null;
+  return { on: b[L.st] === 1, errs: PB_ERR.filter(([, o]) => b[L.st + o] === 1).map(([k]) => k) };
+}
 function pbDecode(frame, L) {
   if (typeof frame !== 'string' || !frame.startsWith('FE0C')) return null;
-  const b = []; for (let i = 0; i < frame.length; i += 2) b.push(parseInt(frame.slice(i, i + 2), 16));
+  const b = pbHex(frame);
   if (b.length <= L.flag || b.some(Number.isNaN)) return null;
   const isF = b[L.flag] === 1;
   const t = (o) => {
@@ -1106,11 +1121,11 @@ function pbDecode(frame, L) {
   };
   return { probes: L.probes.map(t), set: t(L.set), smoker: t(L.grill) };
 }
-const pb = { ws: null, state: 'off', last: null, at: 0, logged: 0, tries: 0, timer: null, dirty: false };
+const pb = { ws: null, state: 'off', last: null, status: null, alerted: [], at: 0, logged: 0, tries: 0, timer: null, dirty: false };
 function pbConnect() {
   const cfg = S.pb; clearTimeout(pb.timer);
   if (!cfg?.on || !cfg.id || !S.cook || pb.ws) return;
-  const L = pbBoard(cfg.id);
+  const L = pbBoard(cfg);
   if (!L) { pb.state = 'board'; pbPaint(); return; }
   pb.state = 'connecting'; pbPaint();
   let ws;
@@ -1119,6 +1134,14 @@ function pbConnect() {
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
     const frames = Array.isArray(m?.status) ? m.status : [];
+    const st = frames.map((f) => pbStatus(f, L)).find(Boolean);
+    if (st) {
+      pb.status = st;
+      // Announce each problem once, and again only if it clears and comes back.
+      const fresh = st.errs.filter((k) => !pb.alerted.includes(k));
+      pb.alerted = st.errs;
+      if (fresh.length) fireAlarm(fresh.map((k) => PB_ERR.find(([n]) => n === k)[2]).join(' '), 'תקלה במעשנה');
+    }
     const r = frames.map((f) => pbDecode(f, L)).find(Boolean);
     if (!r) { if (pb.state === 'connecting') { pb.state = 'waiting'; pbPaint(); } return; }
     pb.last = r; pb.at = Date.now(); pb.state = 'live'; pb.tries = 0;
@@ -1135,7 +1158,7 @@ function pbConnect() {
 }
 function pbStop() {
   clearTimeout(pb.timer);
-  const ws = pb.ws; pb.ws = null; pb.state = 'off'; pb.last = null; pb.at = 0;
+  const ws = pb.ws; pb.ws = null; pb.state = 'off'; pb.last = null; pb.status = null; pb.alerted = []; pb.at = 0;
   try { ws?.close(); } catch { /* already closed */ }
 }
 const pbMeat = (r) => r.probes[(S.pb?.probe || 1) - 1] ?? null;
@@ -1161,9 +1184,13 @@ function pbCard(c) {
   const STATE = {
     off: '', connecting: 'מתחבר…', waiting: 'מחובר, ממתין לנתונים מהמעשנה. כשהיא דולקת, הנתון הראשון מגיע בתוך דקה בערך.',
     error: 'אין חיבור כרגע. מנסה שוב לבד. כדאי לוודא שמזהה המכשיר נכון ושהמעשנה מחוברת לרשת.',
-    board: 'הקידומת של המזהה (האותיות שלפני המקף) לא מוכרת לאפליקציה, ולכן אי אפשר לפענח את הנתונים של הדגם הזה.', live: '',
+    board: 'האפליקציה לא מזהה את סוג הבקר לפי המזהה הזה. בוחרים סוג למטה, ומחליפים עד שהמספרים זהים לאלה שבאפליקציית Pit Boss.', live: '',
   };
   const probes = r ? r.probes.map((v, k) => (v == null ? '' : `<span class="chip">חיישן ${k + 1}: ${v}°C</span>`)).join('') : '';
+  const auto = PB_BOARDS[String(cfg.id || '').split('-')[0]];
+  const picker = (open) => `<details ${open ? 'open' : ''}><summary class="muted small">${open ? 'בחירת סוג הבקר' : 'המספרים לא תואמים לאפליקציית Pit Boss?'}</summary>
+    ${field('סוג הבקר', `<select data-act="pb-board">${auto ? '<option value="">לפי המזהה (ברירת מחדל)</option>' : '<option value="">בחירה…</option>'}${PB_PICK.map(([k, t]) => `<option value="${k}" ${cfg.board === k ? 'selected' : ''}>${t}</option>`).join('')}</select>`)}
+    <p class="muted small">כל סוג מפענח את הנתונים אחרת. הסוג הנכון הוא זה שמציג אותם מספרים כמו אפליקציית Pit Boss.</p></details>`;
   let body;
   if (!cfg.on) {
     body = `<p class="muted">קריאה אוטומטית של טמפרטורת המעשנה והחיישנים, במקום להקליד אותן. החיבור אינו רשמי ועלול להפסיק לעבוד; הוא לקריאה בלבד, והאפליקציה לא יכולה לשנות דבר במעשנה.</p>
@@ -1181,6 +1208,9 @@ function pbCard(c) {
       ${r && !stale ? `<p class="muted small">עודכן ב-${fmtTime(pb.at)}. מדידה נרשמת לבד כל חמש דקות.</p>` : ''}
       ${r && want && r.set != null && Math.abs(r.set - want) > 5 ? `<p class="note warn">המעשנה מכוונת ל-${r.set}°C, והמתכון מבקש בשלב הזה ${want}°C.</p>` : ''}
       ${r && r.probes.filter((v) => v != null).length > 1 || (r && pbMeat(r) == null) ? field('איזה חיישן נעוץ בבשר', `<select data-act="pb-probe">${r.probes.map((v, k) => `<option value="${k + 1}" ${(cfg.probe || 1) === k + 1 ? 'selected' : ''}>חיישן ${k + 1}${v == null ? ' (לא מחובר)' : ` · ${v}°C`}</option>`).join('')}</select>`) : ''}
+      ${(pb.status?.errs || []).map((k) => `<p class="note bad">${PB_ERR.find(([n]) => n === k)[2]}</p>`).join('')}
+      ${r && pb.status && !pb.status.on ? '<p class="note warn">המעשנה מדווחת שהיא כבויה.</p>' : ''}
+      ${picker(pb.state === 'board')}
       <div class="row between"><span class="muted small" dir="ltr">${esc(cfg.id)}</span><button class="btn sm" data-act="pb-off">ניתוק</button></div>`;
   }
   return `<div class="card" id="pb"><div class="row between"><h3>חיבור לפיט בוס</h3>${cfg.on && pb.state === 'live' && !stale ? '<span class="chip live">חי</span>' : ''}</div>${body}</div>`;
@@ -1191,6 +1221,70 @@ function finishCook() {
     date: Date.now(), name: c.name, recipeId: c.recipeId, weight: c.weight, wood: c.wood,
     durationMin: Math.round((Date.now() - c.start) / 60000),
   }, true);
+}
+
+/* ---------- lock-screen notifications (sent by the site's own server function) ---------- */
+// The phone cannot ring a web app's timer while it is locked, so pending alarms are registered with
+// /api/push, which sends each one as a system notification when it is due (to the minute).
+const pushOk = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const pushSub = async () => (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
+function pendingAlarms() {
+  const c = S.cook, now = Date.now(), out = [];
+  if (!c) return out;
+  for (const t of c.timers) if (!t.fired && t.end > now) out.push({ id: 't-' + t.id, at: t.end, title: 'הטיימר הסתיים', body: t.label });
+  if (c.water?.next && !c.water.fired && c.water.next > now) out.push({ id: 'water', at: c.water.next, title: 'תזכורת', body: 'בדיקת מגש המים: להוסיף מים חמים אם המפלס ירד.' });
+  return out;
+}
+let pushTimer = null, pushSent = null;
+function pushSyncSoon() { if (S.push?.on) { clearTimeout(pushTimer); pushTimer = setTimeout(pushSync, 1500); } }
+async function pushSync(force = false) {
+  if (!S.push?.on || !pushOk()) return;
+  const alarms = pendingAlarms(), sig = JSON.stringify(alarms);
+  if (!force && sig === pushSent) return;
+  try {
+    const sub = await pushSub(); if (!sub) return;
+    const res = await fetch('api/push', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sub, alarms }) });
+    if (res.ok) pushSent = sig;
+  } catch { /* offline: the next change tries again */ }
+}
+const b64Bytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (ch) => ch.charCodeAt(0));
+async function pushOn() {
+  try {
+    if ((await Notification.requestPermission()) !== 'granted') { toast('ההתראות חסומות. אפשר לאשר אותן בהגדרות הטלפון, תחת האפליקציה.'); render(); return; }
+    const res = await fetch('api/push');
+    if (!res.ok) { toast(res.status === 404 ? 'התראות במסך נעול פועלות רק בהתקנה מ-Netlify.' : 'השרת לא זמין כרגע. כדאי לנסות שוב בעוד רגע.'); return; }
+    const { key } = await res.json();
+    const reg = await navigator.serviceWorker.ready;
+    await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64Bytes(key) });
+    S.push = { on: true }; pushSent = null; await save(); render();
+    toast('ההתראות הופעלו. כדאי לשלוח התראת בדיקה.');
+  } catch (err) { console.warn(err); toast('לא הצלחתי להפעיל התראות במכשיר הזה.'); }
+}
+async function pushOff() {
+  try {
+    const sub = await pushSub();
+    if (sub) {
+      await fetch('api/push', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sub, alarms: [] }) }).catch(() => {});
+      await sub.unsubscribe();
+    }
+  } catch { /* nothing to undo */ }
+  S.push = { on: false }; save(); render();
+}
+async function pushTest() {
+  try {
+    const sub = await pushSub();
+    if (!sub) { S.push = { on: false }; save(); render(); toast('ההרשמה להתראות אבדה. מפעילים אותה שוב.'); return; }
+    const res = await fetch('api/push', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sub, test: true }) });
+    const { status } = res.ok ? await res.json() : {};
+    toast(status >= 200 && status < 300 ? 'נשלחה התראת בדיקה. היא אמורה להופיע בתוך כמה שניות.' : `ההתראה לא נשלחה (קוד ${status ?? res.status}).`);
+  } catch { toast('אין חיבור לשרת כרגע.'); }
+}
+function pushBlock() {
+  if (!pushOk()) return '<p class="muted small">הטיימר מצלצל רק כשהאפליקציה פתוחה. כדי לקבל התראות גם כשהטלפון נעול, באייפון צריך להוסיף את האפליקציה למסך הבית (שיתוף, ואז "הוסף למסך הבית") ולפתוח אותה משם.</p>';
+  if (S.push?.on && Notification.permission === 'granted') return `<div class="row between"><span class="note good">התראות במסך נעול: פעילות</span><span class="row"><button class="btn sm" data-act="push-test">התראת בדיקה</button><button class="btn sm" data-act="push-off">כיבוי</button></span></div>
+    <p class="muted small">כשהטלפון נעול מגיעות התראות של טיימרים ושל מגש המים, בדיוק של דקה. התראות לפי טמפרטורת הבשר ותקלות במעשנה מגיעות רק כשהאפליקציה פתוחה, ולכן בבישול ארוך כדאי גם לכוון טיימר.</p>`;
+  return `<button class="btn block" data-act="push-on">הפעלת התראות גם כשהטלפון נעול</button>
+    <p class="muted small">בלי זה הטיימר מצלצל רק כשהאפליקציה פתוחה על המסך.</p>`;
 }
 
 /* ---------- alarm / wake lock / notifications ---------- */
@@ -1223,6 +1317,7 @@ async function fireAlarm(label, title = 'הטיימר הסתיים') {
       const reg = await navigator.serviceWorker?.getRegistration();
       if (reg) reg.showNotification(title, { body: label, tag: 'smoker-timer', icon: 'icon-192.png' });
       else new Notification(title, { body: label });
+      if (S.push?.on) pushSyncSoon();
     } catch { /* notifications unavailable */ }
   }
 }
@@ -1630,7 +1725,7 @@ function planIcs() {
 }
 function exportBackup() {
   S.lastBackup = Date.now();
-  download(`smoker-backup-${isoDate(Date.now())}.json`, JSON.stringify({ app: 'smoker', exported: new Date().toISOString(), data: { ...S, pb: undefined } }), 'application/json');
+  download(`smoker-backup-${isoDate(Date.now())}.json`, JSON.stringify({ app: 'smoker', exported: new Date().toISOString(), data: { ...S, pb: undefined, push: undefined } }), 'application/json');
   save(); render();
 }
 async function importBackup(file) {
@@ -1639,7 +1734,7 @@ async function importBackup(file) {
     const d = raw?.app === 'smoker' ? raw.data : null;
     if (!d || !Array.isArray(d.recipes) || !Array.isArray(d.journal) || !Array.isArray(d.ideas)) throw new Error('format');
     if (!confirm(`בקובץ: ${d.recipes.length} מתכונים, ${d.journal.length} רישומי יומן, ${d.ideas.length} רעיונות.\nהשחזור יחליף את כל הנתונים שבמכשיר. להמשיך?`)) return;
-    S = { ...blank(), ...d, recipes: d.recipes, journal: d.journal, ideas: d.ideas, pb: S.pb };
+    S = { ...blank(), ...d, recipes: d.recipes, journal: d.journal, ideas: d.ideas, pb: S.pb, push: S.push };
     await save(); render(); toast('הנתונים שוחזרו');
   } catch { toast('הקובץ אינו קובץ גיבוי תקין של האפליקציה'); }
 }
@@ -1687,7 +1782,9 @@ const ACT = {
   'timer-del': (id) => { S.cook.timers = S.cook.timers.filter((t) => t.id !== id); save(); render(); },
   'log-del': (at) => { S.cook.log = S.cook.log.filter((r) => r.at !== +at); save(); render(); },
   'wake-toggle': (_, el) => { if (S.cook) { S.cook.wake = el.checked; save(); } setWake(el.checked); },
-  'notif-enable': async () => { try { await Notification.requestPermission(); } catch { /* ignore */ } render(); },
+  'push-on': pushOn,
+  'push-off': pushOff,
+  'push-test': pushTest,
   'journal-new': () => journalForm(),
   'journal-open': openJournal,
   'journal-edit': (id) => journalForm(S.journal.find((x) => x.id === id)),
@@ -1704,7 +1801,8 @@ const ACT = {
   'season-toggle': (i, el) => { S.seasoning[i] = el.checked; save(); render(); },
   'plan-ics': planIcs,
   'pb-off': () => { S.pb = { ...S.pb, on: false }; save(); pbStop(); render(); },
-  'pb-probe': (_, el) => { S.pb.probe = +el.value; save(); pbPaint(); },
+  'pb-probe': (_, el) => { S.pb.probe = +el.value; save(); el.blur(); pbPaint(); },
+  'pb-board': (_, el) => { S.pb.board = el.value || null; save(); el.blur(); pbStop(); pb.logged = Date.now(); render(); pbConnect(); },
   'backup-export': exportBackup,
   'packs-restore': () => {
     const have = new Set(S.recipes.map((r) => r.name));
@@ -1715,7 +1813,7 @@ const ACT = {
     save(); render(); toast(add.length === 1 ? 'נוסף מתכון אחד' : `נוספו ${add.length} מתכונים`);
   },
 };
-const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle', 'timer-hours', 'pb-probe']);
+const ON_CHANGE = new Set(['wake-toggle', 'step-toggle', 'season-toggle', 'timer-hours', 'pb-probe', 'pb-board']);
 
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
@@ -1771,6 +1869,7 @@ $('#sheet').addEventListener('close', () => { $('#sheet').innerHTML = ''; });
     toast('אין גישה לאחסון במכשיר. הנתונים לא יישמרו (ייתכן שזה מצב גלישה פרטית).');
   }
   if (S.cook) { tab = 'cook'; if (S.cook.wake !== false) setWake(true, true); pbConnect(); }
+  setTimeout(() => pushSync(true), 3000);
   // v2: pack recipes first shipped with Fahrenheit dial settings; the dial is in Celsius.
   if (S.v < 2) {
     const round = { 107: 110, 121: 120, 135: 135, 149: 150 };

@@ -1,0 +1,8 @@
+{
+  "name": "smoker-app",
+  "private": true,
+  "description": "Server side of the lock-screen notifications. The app itself has no dependencies; this one library is Netlify's own storage client and has no dependencies of its own.",
+  "dependencies": {
+    "@netlify/blobs": "8.1.0"
+  }
+}
