@@ -713,14 +713,36 @@ function planSteps(steps) {
     return { kind, dial, meat, min: kind === 'prep' ? null : stepMinutes(x.t) };
   });
 }
+// Rate of rise of the meat temperature: a least-squares line through the last hour of readings,
+// so one odd reading among the automatic five-minute ones does not swing the estimate.
 function meatTrend(c) {
-  const m = c.log.filter((r) => r.meat != null).sort((a, b) => a.at - b.at);
+  const m = c.log.filter((r) => r.meat != null).sort((x, y) => x.at - y.at);
   const last = m[m.length - 1] || null;
-  if (m.length < 2) return { last, slope: null };
-  const win = m.filter((r) => r.at >= last.at - 90 * 60000);
-  const first = win.length >= 2 ? win[0] : m[m.length - 2];
-  const hrs = (last.at - first.at) / 3600000;
-  return { last, slope: hrs >= 0.15 ? (last.meat - first.meat) / hrs : null };
+  if (m.length < 2) return { last, slope: null, span: 0 };
+  let win = m.filter((r) => r.at >= last.at - 60 * 60000);
+  if (win.length < 2) win = m.slice(-2);
+  const span = (last.at - win[0].at) / 3600000;
+  if (span < 0.15) return { last, slope: null, span };
+  const xs = win.map((r) => (r.at - win[0].at) / 3600000), ys = win.map((r) => r.meat);
+  const mx = xs.reduce((p, v) => p + v, 0) / xs.length, my = ys.reduce((p, v) => p + v, 0) / ys.length;
+  const den = xs.reduce((p, v) => p + (v - mx) ** 2, 0);
+  return { last, slope: den ? xs.reduce((p, v, k) => p + (v - mx) * (ys[k] - my), 0) / den : null, span };
+}
+// What this recipe actually took in earlier cooks recorded in the journal: from "smoker is stable" to the last cooking step.
+function learnedHours(recipeId) {
+  if (!recipeId) return null;
+  const spans = [];
+  for (const j of [...S.journal].sort((x, y) => y.date - x.date)) {
+    if (j.recipeId !== recipeId || !Array.isArray(j.steps) || !j.steps.length) continue;
+    const info = planSteps(j.steps), cooking = (p) => p.kind !== 'prep' && p.kind !== 'heat' && p.kind !== 'rest';
+    const heat = info.findIndex((p) => p.kind === 'heat'), end = info.findLastIndex(cooking);
+    const a = j.steps[heat]?.at, z = j.steps[end]?.at;
+    if (heat < 0 || end <= heat || !a || !z) continue;
+    const h = (z - a) / 3600000;
+    if (h > 0.2 && h < 30) spans.push(h);
+    if (spans.length === 3) break;
+  }
+  return spans.length ? { hours: Math.round((spans.reduce((p, v) => p + v, 0) / spans.length) * 10) / 10, n: spans.length } : null;
 }
 function markStep(i) {
   const c = S.cook, x = c.steps[i]; if (!x) return;
@@ -886,6 +908,7 @@ function stageCard(c) {
     ${sceneSvg(sc)}
     ${stageStrip(st)}
     ${line}
+    ${c.learned ? `<p class="muted">זמן הבישול מחושב לפי ${['', 'הבישול הקודם שלך', 'שני הבישולים האחרונים שלך', 'שלושת הבישולים האחרונים שלך'][c.learned]} במתכון הזה: כ-${c.hours} שעות${c.recipeHours ? ` (במתכון: ${c.recipeHours})` : ''}.</p>` : ''}
     ${p ? `<p class="muted">סיום משוער של כל השלבים, כולל מנוחה: <strong>${fmtTime(end)}</strong>${dayLabel(end) !== 'היום' ? ' ' + dayLabel(end) : ''}. זו הערכה לפי זמני המתכון; בפועל קובעת הטמפרטורה.</p>` : ''}
   </div>`;
 }
@@ -893,11 +916,11 @@ function stageCard(c) {
 /* ---------- cook mode ---------- */
 function startCook(id) {
   if (S.cook && !confirm('יש בישול פעיל. להחליף אותו בבישול חדש? המדידות של הבישול הנוכחי יימחקו.')) return;
-  const r = S.recipes.find((x) => x.id === id);
+  const r = S.recipes.find((x) => x.id === id), mine = learnedHours(r?.id);
   S.cook = {
     id: uid(), recipeId: r?.id || null, name: r?.name || 'בישול חופשי',
     weight: r?.weight ?? null, wood: r?.wood || '', smokerTemp: r?.smokerTemp ?? null, targetTemp: r?.targetTemp ?? null,
-    hours: r?.hours ?? null, rest: r?.rest ?? null, wake: true,
+    hours: mine?.hours ?? r?.hours ?? null, recipeHours: r?.hours ?? null, learned: mine?.n ?? 0, rest: r?.rest ?? null, wake: true,
     start: Date.now(), steps: (r?.steps || []).map((t) => ({ t, at: null })), log: [], timers: [],
   };
   // Water-pan reminders for longer cooks; the clock starts when the meat goes in.
@@ -909,21 +932,24 @@ function startCook(id) {
   save(); closeSheet(); tab = 'cook'; render(); pbConnect();
 }
 function analyze(c) {
-  const m = c.log.filter((r) => r.meat != null).sort((a, b) => a.at - b.at);
   if (!c.targetTemp) return { cls: '', msg: 'לא הוגדרה טמפרטורת יעד, ולכן אין הערכת סיום.' };
-  if (m.length < 2) return { cls: '', msg: 'אחרי שתי מדידות של טמפרטורת הבשר תופיע כאן הערכת זמן סיום.' };
-  const last = m[m.length - 1];
+  const { last, slope, span } = meatTrend(c);
+  if (!last || c.log.filter((r) => r.meat != null).length < 2) return { cls: '', msg: 'אחרי שתי מדידות של טמפרטורת הבשר תופיע כאן הערכת זמן סיום.' };
   if (last.meat >= c.targetTemp) return { cls: 'good', msg: `הבשר הגיע ליעד (${last.meat}°C). אפשר להוציא ולהתחיל מנוחה.` };
-  const win = m.filter((r) => r.at >= last.at - 90 * 60000);
-  const first = win.length >= 2 ? win[0] : m[m.length - 2];
-  const hrs = (last.at - first.at) / 3600000;
-  if (hrs < 0.15) return { cls: '', msg: 'המדידות האחרונות קרובות מדי בזמן. ההערכה תתעדכן במדידה הבאה.' };
-  const slope = (last.meat - first.meat) / hrs;
-  const stall = last.meat >= 60 && last.meat <= 80 && slope < 2 && hrs >= 0.5;
-  if (stall) return { cls: 'warn', msg: `נראה שנכנסת ל-stall: הבשר עומד סביב ${last.meat}°C. זה שלב רגיל. אפשר לחכות בסבלנות, או לעטוף בנייר קצבים או בנייר כסף כדי לקצר אותו.` };
+  if (slope == null) return { cls: '', msg: 'המדידות האחרונות קרובות מדי בזמן. ההערכה תתעדכן במדידה הבאה.' };
+  const info = planSteps(c.steps);
+  if (last.meat >= 60 && last.meat <= 80 && slope < 2 && span >= 0.5) {
+    const wrap = info.findIndex((p, k) => p.kind === 'wrap' && !c.steps[k].at);
+    return { cls: 'warn', msg: `נראה שנכנסת ל-stall: הבשר עומד סביב ${last.meat}°C כבר ${fmtDur(Math.round(span * 60))}. זה שלב רגיל, והוא יכול להימשך שעה עד כמה שעות. ${wrap >= 0 ? `במתכון יש שלב עטיפה שעוד לא בוצע (שלב ${wrap + 1}); עטיפה עכשיו תקצר את ההמתנה, במחיר קרום רך יותר.` : 'אפשר לחכות בסבלנות; העלאת החום ב-10 עד 15 מעלות תקצר אותו.'}` };
+  }
   if (slope <= 0.5) return { cls: 'warn', msg: 'הטמפרטורה כמעט לא עולה כרגע, ולכן אין הערכת סיום.' };
   const eta = last.at + ((c.targetTemp - last.meat) / slope) * 3600000;
-  return { cls: '', msg: `בקצב הנוכחי (כ-${slope.toFixed(1)}°C לשעה) הבשר יגיע ליעד בסביבות ${fmtTime(eta)}${dayLabel(eta) !== 'היום' ? ' ' + dayLabel(eta) : ''}. זו הערכה גסה; stall עלול לדחות אותה.` };
+  // Compare with the recipe's own schedule: the planned end of the last cooking step.
+  const st = stageTimes(c), k = st.findLastIndex((p) => p.kind !== 'prep' && p.kind !== 'heat' && p.kind !== 'rest');
+  const diff = k >= 0 && !st[k].done ? Math.round((eta - st[k].plan) / 60000) : 0;
+  // Before the stall zone is behind us a straight-line estimate runs early, so the comparison would mislead.
+  const vs = Math.abs(diff) >= 20 && (last.meat >= 78 || c.targetTemp < 80) ? ` זה כ-${fmtDur(Math.abs(diff))} ${diff > 0 ? 'אחרי' : 'לפני'} ההערכה של המתכון.` : '';
+  return { cls: vs && diff >= 45 ? 'warn' : '', msg: `בקצב הנוכחי (כ-${slope.toFixed(1)}°C לשעה) הבשר יגיע ליעד בסביבות ${fmtTime(eta)}${dayLabel(eta) !== 'היום' ? ' ' + dayLabel(eta) : ''}.${vs} זו הערכה גסה; stall עלול לדחות אותה.` };
 }
 function chart(log, start, target) {
   const pts = log.filter((r) => r.meat != null || r.smoker != null).sort((a, b) => a.at - b.at);
